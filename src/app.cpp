@@ -637,10 +637,17 @@ std::wstring App::nr_worker_status() const
         const std::wstring adapter_message = temporal_state_->worker_adapter_error_message;
         if (!adapter_message.empty()) adapter_name += L", " + adapter_message;
         else if (adapter_error) adapter_name += L", adapter error " + std::to_wstring(adapter_error);
+        const wchar_t* correction_state = renderer_.worker_correction_active()
+            ? L"correction active"
+            : (renderer_.worker_correction_too_slow()
+                ? L"NR too slow - original only"
+                : L"original only");
         return L"GPU worker connected [" + adapter_name + L", " +
                std::to_wstring(frames) + L" processed, " +
-               std::to_wstring(renderer_.worker_output_frames()) + L" displayed, " +
-               std::to_wstring(renderer_.worker_fallback_frames()) + L" fallback]";
+               std::to_wstring(renderer_.worker_output_frames()) + L" corrections, " +
+               std::to_wstring(renderer_.worker_enhanced_frames()) + L" enhanced, " +
+               std::to_wstring(renderer_.worker_fallback_frames()) + L" original, " +
+               correction_state + L"]";
     }
     if (worker_process_.hProcess) {
         DWORD code = STILL_ACTIVE;
@@ -709,7 +716,8 @@ void App::restart_nr_worker(uint32_t width, uint32_t height)
     worker_path.resize(separator == std::wstring::npos ? 0 : separator + 1);
     worker_path += L"dlss-nr-worker.exe";
     std::wstring command = worker_path + L" " + std::to_wstring(GetCurrentProcessId()) +
-        L" " + std::to_wstring(reinterpret_cast<uintptr_t>(renderer_.shared_texture_handle())) +
+        L" " + std::to_wstring(reinterpret_cast<uintptr_t>(renderer_.shared_input_handle())) +
+        L" " + std::to_wstring(reinterpret_cast<uintptr_t>(renderer_.shared_output_handle())) +
         L" " + std::to_wstring(reinterpret_cast<uintptr_t>(temporal_mapping_)) +
         L" " + std::to_wstring(reinterpret_cast<uintptr_t>(renderer_.worker_event_handle()));
     STARTUPINFOW startup{sizeof(startup)};
@@ -844,6 +852,9 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         std::optional<VideoFrame> frame;
         { std::scoped_lock lock(frame_mutex_); frame.swap(pending_frame_); }
         if (frame) {
+            const LONG adapter = temporal_state_
+                ? InterlockedCompareExchange(&temporal_state_->worker_adapter_state, 0, 0) : 0;
+            renderer_.set_worker_correction_enabled(nr_enabled_ && adapter == 2);
             renderer_.render(*frame);
             const uint64_t now = GetTickCount64();
             last_present_latency_ms_ = frame->arrival_tick_ms && now >= frame->arrival_tick_ms

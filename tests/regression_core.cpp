@@ -18,7 +18,7 @@ VideoFrame solid(uint32_t width, uint32_t height, uint8_t value, uint64_t sequen
 }
 
 int wmain(int argc, wchar_t** argv) {
-    check(nr_worker_protocol_version == 3, "worker protocol version changed unexpectedly");
+    check(nr_worker_protocol_version == 5, "worker protocol version changed unexpectedly");
     WorkerTemporalState state{};
     check(state.magic == nr_worker_protocol_magic, "protocol magic default");
     check(state.byte_size == sizeof(WorkerTemporalState), "protocol byte size default");

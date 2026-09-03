@@ -25,6 +25,9 @@ target_compile_definitions(dlss-nr-capture PRIVATE
 target_compile_options(dlss-nr-capture PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(dlss-nr-capture PRIVATE
     d3d11
+    d3dcompiler
+    d2d1
+    dwrite
     dxgi
     mf
     mfplat
@@ -99,7 +102,8 @@ if(BUILD_TESTING)
     add_test(NAME regression.artifacts
         COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
             -File "${CMAKE_SOURCE_DIR}/tests/artifact_layout.ps1"
-            -ReleaseDir "$<TARGET_FILE_DIR:dlss-nr-capture>")
+            -ReleaseDir "$<TARGET_FILE_DIR:dlss-nr-capture>"
+            -SourceDir "${CMAKE_SOURCE_DIR}")
     add_test(NAME regression.app-smoke
         COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
             -File "${CMAKE_SOURCE_DIR}/tests/app_smoke.ps1"

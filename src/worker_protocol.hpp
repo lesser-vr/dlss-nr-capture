@@ -3,7 +3,7 @@
 #include <cstdint>
 
 constexpr uint32_t nr_worker_protocol_magic = 0x4E525743; // NRWC
-constexpr uint32_t nr_worker_protocol_version = 3;
+constexpr uint32_t nr_worker_protocol_version = 5;
 constexpr uint32_t nr_worker_max_mask_tiles = 256;
 
 enum TemporalFlags : uint32_t {

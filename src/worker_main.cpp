@@ -94,12 +94,13 @@ std::wstring adapter_path(bool nr_enabled)
 
 int wmain(int argc, wchar_t** argv)
 {
-    if (argc != 5) return 2;
+    if (argc != 6) return 2;
     const DWORD parent_id = static_cast<DWORD>(_wtoi(argv[1]));
-    const HANDLE shared_texture = reinterpret_cast<HANDLE>(_wcstoui64(argv[2], nullptr, 10));
-    const HANDLE shared_metadata = reinterpret_cast<HANDLE>(_wcstoui64(argv[3], nullptr, 10));
+    const HANDLE shared_input = reinterpret_cast<HANDLE>(_wcstoui64(argv[2], nullptr, 10));
+    const HANDLE shared_output = reinterpret_cast<HANDLE>(_wcstoui64(argv[3], nullptr, 10));
+    const HANDLE shared_metadata = reinterpret_cast<HANDLE>(_wcstoui64(argv[4], nullptr, 10));
     HANDLE parent = OpenProcess(SYNCHRONIZE, FALSE, parent_id);
-    HANDLE ready = reinterpret_cast<HANDLE>(_wcstoui64(argv[4], nullptr, 10));
+    HANDLE ready = reinterpret_cast<HANDLE>(_wcstoui64(argv[5], nullptr, 10));
     if (!parent || !ready) { if (parent) CloseHandle(parent); return 3; }
 
     auto* temporal = static_cast<WorkerTemporalState*>(
@@ -120,18 +121,19 @@ int wmain(int argc, wchar_t** argv)
         UnmapViewOfFile(temporal); CloseHandle(parent); return 5;
     }
     ComPtr<ID3D11Device1> device1;
-    ComPtr<ID3D11Texture2D> texture;
+    ComPtr<ID3D11Texture2D> input_texture, output_texture;
     if (FAILED(device.As(&device1)) ||
-        FAILED(device1->OpenSharedResource1(shared_texture, IID_PPV_ARGS(&texture)))) {
+        FAILED(device1->OpenSharedResource1(shared_input, IID_PPV_ARGS(&input_texture))) ||
+        FAILED(device1->OpenSharedResource1(shared_output, IID_PPV_ARGS(&output_texture)))) {
         UnmapViewOfFile(temporal); CloseHandle(parent); return 6;
     }
-    ComPtr<IDXGIKeyedMutex> mutex;
-    if (FAILED(texture.As(&mutex))) {
+    ComPtr<IDXGIKeyedMutex> input_mutex, output_mutex;
+    if (FAILED(input_texture.As(&input_mutex)) || FAILED(output_texture.As(&output_mutex))) {
         UnmapViewOfFile(temporal); CloseHandle(parent); return 7;
     }
 
     D3D11_TEXTURE2D_DESC description{};
-    texture->GetDesc(&description);
+    output_texture->GetDesc(&description);
     LONG adapter_error = 0;
     const bool nr_enabled = InterlockedCompareExchange(&temporal->nr_enabled, 0, 0) != 0;
     std::unique_ptr<INrAdapter> adapter;
@@ -158,8 +160,12 @@ int wmain(int argc, wchar_t** argv)
     int consecutive_failures = 0;
     while (WaitForSingleObject(parent, 0) == WAIT_TIMEOUT) {
         InterlockedExchange64(&temporal->worker_heartbeat_ms, static_cast<LONG64>(GetTickCount64()));
-        const HRESULT acquired = mutex->AcquireSync(1, 100);
-        if (SUCCEEDED(acquired)) {
+        const HRESULT acquired = input_mutex->AcquireSync(1, 100);
+        if (acquired == S_OK) {
+            const HRESULT output_acquired = output_mutex->AcquireSync(0, 100);
+            if (output_acquired == S_OK) context->CopyResource(output_texture.Get(), input_texture.Get());
+            input_mutex->ReleaseSync(0);
+            if (output_acquired != S_OK) continue;
             TemporalAnalysisPayload payload{};
             LONG before{}, after{};
             do {
@@ -176,7 +182,7 @@ int wmain(int argc, wchar_t** argv)
             payload.nr_temporal = InterlockedCompareExchange(&temporal->nr_temporal, 0, 0) != 0;
             payload.nr_automask = 1;
             if ((payload.flags & temporal_valid) != 0 && payload.frame_sequence >= last_sequence) {
-                if (adapter->process(context.Get(), texture.Get(), payload)) {
+                if (adapter->process(context.Get(), output_texture.Get(), payload)) {
                     consecutive_failures = 0;
                     last_sequence = payload.frame_sequence;
                     InterlockedIncrement64(&temporal->worker_processed_frames);
@@ -192,7 +198,7 @@ int wmain(int argc, wchar_t** argv)
                     consecutive_failures = 0;
                 }
             }
-            mutex->ReleaseSync(0);
+            output_mutex->ReleaseSync(1);
         }
     }
     InterlockedExchange(&temporal->worker_adapter_state, 0);

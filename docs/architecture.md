@@ -12,7 +12,9 @@ pipeline.
 - Capture publishes at most one pending frame.
 - A newly captured frame replaces an unrendered older frame.
 - Rendering runs on the window thread for this milestone.
-- GPU processing will move to a dedicated worker with explicit fences.
+- GPU processing runs in a dedicated worker with separate keyed-mutex input and output textures.
+- The worker publishes encoded NR correction data; the renderer applies it to the newest live frame.
+- Corrections are displayed only after five consecutive updates no more than 25 ms apart and remain active only while fresher than 40 ms. Slower correction streams fall back to the live original so motion remains stable.
 
 This intentionally prefers a dropped frame over accumulated input latency.
 
@@ -22,7 +24,7 @@ This intentionally prefers a dropped frame over accumulated input latency.
 
 1. `PassthroughProcessor` — safe fallback and pipeline validation.
 2. `MotionAnalysisProcessor` — optical flow, confidence, cut detection.
-3. `NrWorkerProcessor` — shared-texture IPC to an isolated D3D12/NGX worker.
+3. `NrWorkerProcessor` — dual shared-texture IPC to an isolated D3D12/NGX worker.
 
 The application must never require or download a proprietary runtime merely to
 start. A worker crash or unsupported runtime must switch the processor back to

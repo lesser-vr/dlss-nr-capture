@@ -1,4 +1,7 @@
-param([Parameter(Mandatory=$true)][string]$ReleaseDir)
+param(
+  [Parameter(Mandatory=$true)][string]$ReleaseDir,
+  [Parameter(Mandatory=$true)][string]$SourceDir
+)
 $required = @(
   'dlss-nr-capture.exe', 'dlss-nr-worker.exe', 'dlss-nr-adapter-bridge.dll',
   'dlss-nr-adapter-sample.dll', 'nr-runtime\dlss5nr_bridge.dll',
@@ -8,8 +11,7 @@ $missing = @($required | Where-Object {
   -not (Test-Path -LiteralPath (Join-Path $ReleaseDir $_) -PathType Leaf)
 })
 if ($missing.Count) { throw "Missing build artifacts: $($missing -join ', ')" }
-$proprietary = Get-ChildItem -LiteralPath $ReleaseDir -Recurse -File | Where-Object {
-  $_.Name -in @('_nvngx.dll','nvngx_dlssnr.dll')
-}
-if ($proprietary) { throw "Proprietary NVIDIA binary found in build output: $($proprietary.FullName -join ', ')" }
+$tracked = @(git -C $SourceDir ls-files -- '*nvngx_dlssnr.dll' '*_nvngx.dll')
+if ($LASTEXITCODE -ne 0) { throw 'Could not inspect tracked repository files' }
+if ($tracked.Count) { throw "Proprietary NVIDIA binary is tracked by Git: $($tracked -join ', ')" }
 Write-Host 'artifact layout checks passed'

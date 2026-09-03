@@ -143,9 +143,25 @@ bool __stdcall process(ID3D11DeviceContext* context, ID3D11Texture2D* texture,
             const float r = source[x * 3 + (swap_channels ? 2 : 0)];
             const float g = source[x * 3 + 1];
             const float b = source[x * 3 + (swap_channels ? 0 : 2)];
-            row[x * 4] = static_cast<uint8_t>(std::clamp(b, 0.0f, 1.0f) * 255.0f + 0.5f);
-            row[x * 4 + 1] = static_cast<uint8_t>(std::clamp(g, 0.0f, 1.0f) * 255.0f + 0.5f);
-            row[x * 4 + 2] = static_cast<uint8_t>(std::clamp(r, 0.0f, 1.0f) * 255.0f + 0.5f);
+            const float input_r = rgb_input[(static_cast<size_t>(y) * width + x) * 3];
+            const float input_g = rgb_input[(static_cast<size_t>(y) * width + x) * 3 + 1];
+            const float input_b = rgb_input[(static_cast<size_t>(y) * width + x) * 3 + 2];
+            bool reject = false;
+            if (temporal->mask_columns && temporal->mask_rows) {
+                const uint32_t column = std::min<uint32_t>(temporal->mask_columns - 1,
+                    x * temporal->mask_columns / width);
+                const uint32_t mask_row = std::min<uint32_t>(temporal->mask_rows - 1,
+                    y * temporal->mask_rows / height);
+                const size_t mask_index = static_cast<size_t>(mask_row) * temporal->mask_columns + column;
+                reject = mask_index < nr_worker_max_mask_tiles && temporal->rejection_mask[mask_index] != 0;
+            }
+            auto encode = [reject](float delta) {
+                if (reject) delta = 0.0f;
+                return static_cast<uint8_t>(std::clamp(0.5f + delta * 2.0f, 0.0f, 1.0f) * 255.0f + 0.5f);
+            };
+            row[x * 4] = encode(b - input_b);
+            row[x * 4 + 1] = encode(g - input_g);
+            row[x * 4 + 2] = encode(r - input_r);
             row[x * 4 + 3] = 255;
         }
     }
