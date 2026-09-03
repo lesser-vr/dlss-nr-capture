@@ -1,0 +1,20 @@
+# CMake / Visual Studio build output
+build/
+out/
+.vs/
+CMakeUserPresets.json
+*.user
+*.suo
+*.pdb
+*.ilk
+
+# User-supplied or proprietary NVIDIA runtime binaries
+nvngx_dlssnr.dll
+_nvngx.dll
+
+# Local logs and temporary files
+*.log
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
