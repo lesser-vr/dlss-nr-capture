@@ -85,6 +85,9 @@ private:
     std::wstring status_ = L"Starting";
     std::atomic_bool flip_vertical_{false};
     uint64_t displayed_frames_{};
+    std::atomic_uint64_t received_frames_{};
+    std::atomic_uint64_t dropped_frames_{};
+    uint64_t last_present_latency_ms_{};
     bool fullscreen_{};
     bool always_on_top_{};
     bool auto_size_to_resolution_{};

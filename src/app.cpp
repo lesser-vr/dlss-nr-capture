@@ -566,6 +566,10 @@ void App::start_capture_frame_rate(size_t index)
         std::scoped_lock lock(frame_mutex_);
         pending_frame_.reset();
     }
+    received_frames_.store(0, std::memory_order_relaxed);
+    dropped_frames_.store(0, std::memory_order_relaxed);
+    displayed_frames_ = 0;
+    last_present_latency_ms_ = 0;
     processor_->reset_history();
     set_vertical_flip(modes_[index].format_name == L"RGB24");
     status_ = L"Opening " + modes_[index].display_name();
@@ -772,8 +776,10 @@ void App::enqueue_frame(VideoFrame&& frame)
         MemoryBarrier();
         InterlockedIncrement(&temporal_state_->sequence);
     }
+    received_frames_.fetch_add(1, std::memory_order_relaxed);
     {
         std::scoped_lock lock(frame_mutex_);
+        if (pending_frame_) dropped_frames_.fetch_add(1, std::memory_order_relaxed);
         pending_frame_ = std::move(frame);
     }
     PostMessageW(window_, frame_ready_message, 0, 0);
@@ -785,6 +791,12 @@ void App::update_title()
     const std::string details = processor_->diagnostics();
     if (!details.empty()) title += L" — " + widen(details);
     title += L" — " + nr_worker_status();
+    const uint64_t received = received_frames_.load(std::memory_order_relaxed);
+    const uint64_t dropped = dropped_frames_.load(std::memory_order_relaxed);
+    if (received) {
+        title += L" — latency " + std::to_wstring(last_present_latency_ms_) + L" ms";
+        title += L" | dropped " + std::to_wstring(dropped) + L"/" + std::to_wstring(received);
+    }
     SetWindowTextW(window_, title.c_str());
 }
 
@@ -831,6 +843,9 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         { std::scoped_lock lock(frame_mutex_); frame.swap(pending_frame_); }
         if (frame) {
             renderer_.render(*frame);
+            const uint64_t now = GetTickCount64();
+            last_present_latency_ms_ = frame->arrival_tick_ms && now >= frame->arrival_tick_ms
+                ? now - frame->arrival_tick_ms : 0;
             ++displayed_frames_;
             if (displayed_frames_ % 15 == 0) update_title();
             if (displayed_frames_ % 60 == 0) ensure_nr_worker_health();

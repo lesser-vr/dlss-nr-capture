@@ -20,6 +20,7 @@ Windows용 저지연 캡처·Neural Rendering 실험 애플리케이션입니다
 - View > Always on top으로 창을 항상 위에 표시하고 선택 상태 자동 복원
 - View > Size window to capture resolution로 캡처 해상도에 맞춘 창 크기 자동 조절 및 상태 복원 (Per-Monitor DPI V2 및 Windows 배율 대응)
 - `nvngx_dlssnr.dll` 누락 시 오류창을 표시하고 패스스루 유지
+- 창 제목에 프레임 도착→표시 지연과 latest-frame 교체 드롭 수 실시간 표시
 
 기본 처리 백엔드는 `Passthrough`이며, 사용자가 별도 제공한 호환 런타임이 있을 때만
 선택적으로 DLSS Neural Rendering 브리지를 활성화합니다. GPU 작업 프로세스, 공유 텍스처,
@@ -27,11 +28,11 @@ Windows용 저지연 캡처·Neural Rendering 실험 애플리케이션입니다
 
 ## 빌드
 
-Visual Studio 2022의 C++ Build Tools와 Windows SDK가 필요합니다.
+Visual Studio 2026의 C++ Build Tools와 Windows SDK가 필요합니다.
 
 ```powershell
-& 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe' -S . -B build -G 'Visual Studio 17 2022' -A x64
-& 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe' --build build --config Release
+cmake -S . -B build -G 'Visual Studio 18 2026' -A x64
+cmake --build build --config Release
 ```
 
 실행 파일은 `build/Release/dlss-nr-capture.exe`에 생성됩니다. 상단의 `Capture device`와
@@ -81,13 +82,13 @@ build/Release/nr-runtime/caller/nvngx.dll_comfy.dll
 Release 빌드와 전체 회귀 테스트를 한 번에 실행합니다.
 
 ```powershell
-& 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe' --build build --config Release --target regression
+cmake --build build --config Release --target regression
 ```
 
 또는 이미 빌드된 결과에 대해 CTest만 다시 실행할 수 있습니다.
 
 ```powershell
-& 'C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\ctest.exe' --test-dir build -C Release --output-on-failure
+ctest --test-dir build -C Release --output-on-failure
 ```
 
 테스트 묶음은 프로토콜·모션 분석·어댑터 ABI, 필수 산출물과 독점 NVIDIA DLL 미포함,

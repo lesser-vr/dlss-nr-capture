@@ -365,6 +365,7 @@ HRESULT CaptureEngine::OnReadSample(HRESULT status, DWORD, DWORD flags,
                     callback = on_frame_;
                 }
                 frame.timestamp_100ns = timestamp;
+                frame.arrival_tick_ms = GetTickCount64();
                 if (convert_to_bgra(format, bytes, length, frame.width, frame.height, frame.bgra) && callback)
                     callback(std::move(frame));
                 buffer->Unlock();
