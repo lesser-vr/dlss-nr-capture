@@ -21,6 +21,19 @@ ID3D11Texture2D* staging{};
 D3D11_TEXTURE2D_DESC input_description{};
 std::vector<float> rgb_input;
 std::vector<float> rgb_output;
+std::wstring last_error_message;
+
+void set_last_error(const char* message)
+{
+    if (!message || !*message) { last_error_message.clear(); return; }
+    const int length = MultiByteToWideChar(CP_UTF8, 0, message, -1, nullptr, 0);
+    if (length <= 1) { last_error_message = L"Unknown NR adapter error"; return; }
+    last_error_message.resize(static_cast<size_t>(length));
+    MultiByteToWideChar(CP_UTF8, 0, message, -1, last_error_message.data(), length);
+    last_error_message.resize(static_cast<size_t>(length - 1));
+}
+
+const wchar_t* __stdcall last_error() { return last_error_message.c_str(); }
 
 std::wstring module_directory()
 {
@@ -38,21 +51,30 @@ std::wstring module_directory()
 
 bool __stdcall initialize(ID3D11Device* supplied_device, const D3D11_TEXTURE2D_DESC* description)
 {
-    if (!supplied_device || !description || description->Format != DXGI_FORMAT_B8G8R8A8_UNORM)
+    last_error_message.clear();
+    if (!supplied_device || !description || description->Format != DXGI_FORMAT_B8G8R8A8_UNORM) {
+        last_error_message = L"Unsupported D3D11 device or texture format";
         return false;
+    }
     const std::wstring base = module_directory();
     const std::wstring runtime = base + L"nr-runtime";
     const std::wstring bridge = runtime + L"\\dlss5nr_bridge.dll";
     bridge_module = LoadLibraryExW(bridge.c_str(), nullptr,
         LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if (!bridge_module) return false;
+    if (!bridge_module) { last_error_message = L"Cannot load nr-runtime\\dlss5nr_bridge.dll"; return false; }
     bridge_init = reinterpret_cast<BridgeInit>(GetProcAddress(bridge_module, "dlss5nr_init"));
     bridge_process = reinterpret_cast<BridgeProcess>(GetProcAddress(bridge_module, "dlss5nr_process"));
     bridge_shutdown = reinterpret_cast<BridgeShutdown>(GetProcAddress(bridge_module, "dlss5nr_shutdown"));
-    if (!bridge_init || !bridge_process || !bridge_shutdown) return false;
+    if (!bridge_init || !bridge_process || !bridge_shutdown) {
+        last_error_message = L"Required dlss5nr_bridge exports are missing";
+        return false;
+    }
 
     char error[1024]{};
-    if (!bridge_init(0, runtime.c_str(), error, static_cast<int>(sizeof(error)))) return false;
+    if (!bridge_init(0, runtime.c_str(), error, static_cast<int>(sizeof(error)))) {
+        set_last_error(error);
+        return false;
+    }
 
     device = supplied_device;
     device->AddRef();
@@ -62,7 +84,10 @@ bool __stdcall initialize(ID3D11Device* supplied_device, const D3D11_TEXTURE2D_D
     staging_description.BindFlags = 0;
     staging_description.CPUAccessFlags = D3D11_CPU_ACCESS_READ | D3D11_CPU_ACCESS_WRITE;
     staging_description.MiscFlags = 0;
-    if (FAILED(device->CreateTexture2D(&staging_description, nullptr, &staging))) return false;
+    if (FAILED(device->CreateTexture2D(&staging_description, nullptr, &staging))) {
+        last_error_message = L"Cannot create the NR staging texture";
+        return false;
+    }
     const size_t values = static_cast<size_t>(description->Width) * description->Height * 3;
     rgb_input.resize(values);
     rgb_output.resize(values);
@@ -95,7 +120,11 @@ bool __stdcall process(ID3D11DeviceContext* context, ID3D11Texture2D* texture,
             temporal->nr_intensity_percent / 100.0f, 1.0f, 1.0f, -1.0f,
             temporal->nr_automask ? 1 : 0, reject_history ? 1 : 0,
             (!reject_history && temporal->nr_temporal) ? 1 : 0,
-            error, static_cast<int>(sizeof(error)))) return false;
+            error, static_cast<int>(sizeof(error)))) {
+        set_last_error(error);
+        return false;
+    }
+    last_error_message.clear();
 
     double direct_error = 0.0, swapped_error = 0.0;
     for (size_t i = 0; i < rgb_output.size(); i += 192) {
@@ -137,7 +166,7 @@ void __stdcall shutdown()
 
 const NrAdapterApi api{
     sizeof(NrAdapterApi), nr_adapter_abi_version, L"DLSS 5 NR bridge",
-    initialize, process, shutdown
+    initialize, process, shutdown, last_error
 };
 }
 

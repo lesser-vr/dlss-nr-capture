@@ -20,6 +20,7 @@ Windows용 저지연 캡처·Neural Rendering 실험 애플리케이션입니다
 - View > Always on top으로 창을 항상 위에 표시하고 선택 상태 자동 복원
 - View > Size window to capture resolution로 캡처 해상도에 맞춘 창 크기 자동 조절 및 상태 복원 (Per-Monitor DPI V2 및 Windows 배율 대응)
 - `nvngx_dlssnr.dll` 누락 시 오류창을 표시하고 패스스루 유지
+- NR 초기화·처리 실패 시 브리지의 상세 오류를 표시하고 안전하게 패스스루로 전환
 - 창 제목에 프레임 도착→표시 지연과 latest-frame 교체 드롭 수 실시간 표시
 
 기본 처리 백엔드는 `Passthrough`이며, 사용자가 별도 제공한 호환 런타임이 있을 때만

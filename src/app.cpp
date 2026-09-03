@@ -634,7 +634,9 @@ std::wstring App::nr_worker_status() const
         if (heartbeat && GetTickCount64() - heartbeat > 1500) return L"GPU worker timed out — passthrough";
         std::wstring adapter_name = temporal_state_->worker_adapter_name;
         if (adapter_name.empty()) adapter_name = adapter == 1 ? L"Passthrough" : L"External";
-        if (adapter_error) adapter_name += L", adapter error " + std::to_wstring(adapter_error);
+        const std::wstring adapter_message = temporal_state_->worker_adapter_error_message;
+        if (!adapter_message.empty()) adapter_name += L", " + adapter_message;
+        else if (adapter_error) adapter_name += L", adapter error " + std::to_wstring(adapter_error);
         return L"GPU worker connected [" + adapter_name + L", " +
                std::to_wstring(frames) + L" processed, " +
                std::to_wstring(renderer_.worker_output_frames()) + L" displayed, " +

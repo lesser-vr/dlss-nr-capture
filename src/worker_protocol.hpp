@@ -3,7 +3,7 @@
 #include <cstdint>
 
 constexpr uint32_t nr_worker_protocol_magic = 0x4E525743; // NRWC
-constexpr uint32_t nr_worker_protocol_version = 2;
+constexpr uint32_t nr_worker_protocol_version = 3;
 constexpr uint32_t nr_worker_max_mask_tiles = 256;
 
 enum TemporalFlags : uint32_t {
@@ -45,5 +45,6 @@ struct WorkerTemporalState {
     volatile LONG nr_intensity_percent{100};
     volatile LONG nr_temporal{1};
     wchar_t worker_adapter_name[64]{};
+    wchar_t worker_adapter_error_message[256]{};
     TemporalAnalysisPayload payload{};
 };

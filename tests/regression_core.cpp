@@ -18,7 +18,7 @@ VideoFrame solid(uint32_t width, uint32_t height, uint8_t value, uint64_t sequen
 }
 
 int wmain(int argc, wchar_t** argv) {
-    check(nr_worker_protocol_version == 2, "worker protocol version changed unexpectedly");
+    check(nr_worker_protocol_version == 3, "worker protocol version changed unexpectedly");
     WorkerTemporalState state{};
     check(state.magic == nr_worker_protocol_magic, "protocol magic default");
     check(state.byte_size == sizeof(WorkerTemporalState), "protocol byte size default");
@@ -59,7 +59,8 @@ int wmain(int argc, wchar_t** argv) {
                 check(get_api(nr_adapter_abi_version + 1) == nullptr, "adapter rejects wrong ABI");
                 const NrAdapterApi* api = get_api(nr_adapter_abi_version);
                 check(api && api->byte_size >= sizeof(NrAdapterApi), "adapter API size");
-                check(api && api->initialize && api->process && api->shutdown, "adapter callbacks");
+                check(api && api->initialize && api->process && api->shutdown && api->last_error, "adapter callbacks");
+                if (api && api->last_error) check(std::wstring(api->last_error()).empty(), "adapter error default");
             }
             FreeLibrary(module);
         }
