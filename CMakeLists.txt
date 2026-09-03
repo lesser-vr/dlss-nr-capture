@@ -1,0 +1,117 @@
+cmake_minimum_required(VERSION 3.24)
+project(DlssNrCapture LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+add_executable(dlss-nr-capture WIN32
+    src/main.cpp
+    src/app.manifest
+    src/app.cpp
+    src/audio_capture.cpp
+    src/capture_engine.cpp
+    src/d3d11_renderer.cpp
+    src/frame_processor.cpp
+)
+
+target_include_directories(dlss-nr-capture PRIVATE src)
+target_compile_definitions(dlss-nr-capture PRIVATE
+    UNICODE
+    _UNICODE
+    NOMINMAX
+    WIN32_LEAN_AND_MEAN
+)
+target_compile_options(dlss-nr-capture PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(dlss-nr-capture PRIVATE
+    d3d11
+    dxgi
+    mf
+    mfplat
+    mfreadwrite
+    mfuuid
+    ole32
+    shlwapi
+    windowscodecs
+    winmm
+    advapi32
+)
+
+
+add_library(dlss-nr-adapter-bridge SHARED src/dlss5nr_bridge_adapter.cpp)
+target_include_directories(dlss-nr-adapter-bridge PRIVATE src)
+target_compile_definitions(dlss-nr-adapter-bridge PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(dlss-nr-adapter-bridge PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(dlss-nr-adapter-bridge PRIVATE d3d11 dxgi)
+set_target_properties(dlss-nr-adapter-bridge PROPERTIES OUTPUT_NAME "dlss-nr-adapter-bridge")
+
+# MIT-licensed public bridge components. NVIDIA runtime binaries are intentionally
+# not part of this target or repository and must be supplied separately by users.
+add_library(dlss5nr-runtime-bridge SHARED
+    third_party/comfyui_dlss5_nr/dlss5nr_bridge.cpp
+    third_party/comfyui_dlss5_nr/nvof_flow.cpp
+)
+target_include_directories(dlss5nr-runtime-bridge PRIVATE third_party/comfyui_dlss5_nr)
+target_compile_options(dlss5nr-runtime-bridge PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(dlss5nr-runtime-bridge PRIVATE d3d12 d3d11 dxgi ole32)
+set_target_properties(dlss5nr-runtime-bridge PROPERTIES
+    OUTPUT_NAME "dlss5nr_bridge"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/nr-runtime"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/nr-runtime"
+)
+
+add_library(dlss5nr-caller-shim SHARED third_party/comfyui_dlss5_nr/caller_shim.cpp)
+target_compile_options(dlss5nr-caller-shim PRIVATE /W4 /permissive- /EHsc /utf-8)
+set_target_properties(dlss5nr-caller-shim PROPERTIES
+    OUTPUT_NAME "nvngx.dll_comfy"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/nr-runtime/caller"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/nr-runtime/caller"
+)
+
+add_library(dlss-nr-adapter-sample SHARED src/sample_adapter.cpp)
+target_include_directories(dlss-nr-adapter-sample PRIVATE src)
+target_compile_definitions(dlss-nr-adapter-sample PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(dlss-nr-adapter-sample PRIVATE /W4 /permissive- /EHsc /utf-8)
+set_target_properties(dlss-nr-adapter-sample PROPERTIES OUTPUT_NAME "dlss-nr-adapter-sample")
+
+add_executable(dlss-nr-worker src/worker_main.cpp)
+target_compile_definitions(dlss-nr-worker PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(dlss-nr-worker PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(dlss-nr-worker PRIVATE d3d11 dxgi)
+
+set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT dlss-nr-capture)
+
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(dlss-nr-regression-core
+        tests/regression_core.cpp
+        src/frame_processor.cpp
+    )
+    target_include_directories(dlss-nr-regression-core PRIVATE src)
+    target_compile_definitions(dlss-nr-regression-core PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_options(dlss-nr-regression-core PRIVATE /W4 /permissive- /EHsc /utf-8)
+
+    add_test(NAME regression.core
+        COMMAND dlss-nr-regression-core
+            $<TARGET_FILE:dlss-nr-adapter-sample>
+            $<TARGET_FILE:dlss5nr-runtime-bridge>)
+    add_test(NAME regression.artifacts
+        COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
+            -File "${CMAKE_SOURCE_DIR}/tests/artifact_layout.ps1"
+            -ReleaseDir "$<TARGET_FILE_DIR:dlss-nr-capture>")
+    add_test(NAME regression.app-smoke
+        COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
+            -File "${CMAKE_SOURCE_DIR}/tests/app_smoke.ps1"
+            -AppPath "$<TARGET_FILE:dlss-nr-capture>")
+    set_tests_properties(regression.app-smoke PROPERTIES
+        TIMEOUT 45
+        RUN_SERIAL TRUE)
+
+    add_custom_target(regression
+        COMMAND "${CMAKE_CTEST_COMMAND}" -C $<CONFIG> --output-on-failure
+        DEPENDS dlss-nr-capture dlss-nr-worker dlss-nr-adapter-sample
+                dlss-nr-adapter-bridge dlss5nr-runtime-bridge dlss5nr-caller-shim
+                dlss-nr-regression-core
+        USES_TERMINAL)
+endif()
