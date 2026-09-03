@@ -279,6 +279,7 @@ void App::discover_capture_devices()
     AppendMenuW(menu_bar_, MF_POPUP, reinterpret_cast<UINT_PTR>(view_menu_), L"View");
     SetMenu(window_, menu_bar_);
     renderer_.set_worker_wait_ms(nr_wait_ms_);
+    restoring_settings_ = false;
 
     if (devices_.empty()) {
         status_ = L"No capture device found";
@@ -298,7 +299,6 @@ void App::discover_capture_devices()
         for (size_t index = 0; index < audio_devices_.size(); ++index)
             if (audio_devices_[index].name == saved_audio_name_) { start_audio_capture(index); break; }
     }
-    restoring_settings_ = false;
 }
 
 void App::start_audio_capture(size_t index)
