@@ -15,7 +15,7 @@ public static class RegressionUi {
  [DllImport("user32.dll")] public static extern IntPtr GetSubMenu(IntPtr h, int p);
  [DllImport("user32.dll")] public static extern uint GetMenuState(IntPtr h, uint id, uint f);
  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetMenuString(IntPtr h, uint i, StringBuilder s, int n, uint f);
- [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+ [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
  [DllImport("user32.dll", EntryPoint="GetWindowLongW")] public static extern int GetWindowLong(IntPtr h, int n);
  [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr h);
  [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr c);
@@ -44,7 +44,7 @@ try {
   foreach ($expected in @('Capture device','Video format','Resolution','Frame rate','Audio capture','Processing','Neural Rendering','View')) {
     if ($labels -notcontains $expected) { throw "Menu missing: $expected" }
   }
-  foreach ($command in @(49001,49002,51001,51102,51204,51301,51401)) { [void][RegressionUi]::PostMessage([IntPtr]$script:app.MainWindowHandle,0x111,[IntPtr]$command,[IntPtr]::Zero); Start-Sleep -Milliseconds 100 }
+  foreach ($command in @(49001,49002,51001,51102,51204,51301,51401)) { [void][RegressionUi]::SendMessage([IntPtr]$script:app.MainWindowHandle,0x111,[IntPtr]$command,[IntPtr]::Zero) }
   Start-Sleep -Milliseconds 500
 
   $saved = Get-ItemProperty -LiteralPath $keyPs
