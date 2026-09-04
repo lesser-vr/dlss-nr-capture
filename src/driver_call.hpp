@@ -47,6 +47,7 @@ auto driver_call(HWND window, Call call) -> std::invoke_result_t<Call> {
             case WM_PAINT: case WM_NCPAINT: case WM_ERASEBKGND:
             case WM_SIZE: case WM_MOVE: case WM_WINDOWPOSCHANGING: case WM_WINDOWPOSCHANGED:
             case WM_NCHITTEST: case WM_SETCURSOR: case WM_SYSCOMMAND:
+            case WM_NCLBUTTONDOWN: case WM_NCLBUTTONUP: case WM_NCLBUTTONDBLCLK:
             case WM_DPICHANGED: case WM_GETMINMAXINFO:
                 DispatchMessageW(&msg); break;
             default: break; // Discard user commands/timers during a serialized operation.

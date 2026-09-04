@@ -1279,7 +1279,7 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     if (driver_call_active) {
         if (message == WM_CLOSE || (message == WM_SYSCOMMAND && (wparam & 0xfff0) == SC_CLOSE))
             TerminateProcess(GetCurrentProcess(), 0);
-        if (message == WM_COMMAND || message == WM_TIMER || message == WM_MOUSEWHEEL) return 0;
+        if (message == WM_COMMAND || message == WM_TIMER || message == WM_MOUSEWHEEL || message == frame_ready_message) return 0;
     }
     switch (message) {
     case WM_TIMER:
