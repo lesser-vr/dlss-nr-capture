@@ -174,6 +174,7 @@ int wmain(int argc, wchar_t** argv)
             if (output_acquired == S_OK) context->CopyResource(output_texture.Get(), input_texture.Get());
             input_mutex->ReleaseSync(0);
             if (output_acquired != S_OK) continue;
+            bool output_completed = false;
             TemporalAnalysisPayload payload{};
             LONG before{}, after{};
             do {
@@ -193,7 +194,6 @@ int wmain(int argc, wchar_t** argv)
                 if (adapter->process(context.Get(), output_texture.Get(), payload)) {
                     consecutive_failures = 0;
                     last_sequence = payload.frame_sequence;
-                    InterlockedIncrement64(&temporal->worker_processed_frames);
                     const NrTimingSnapshot timing = adapter->timings();
                     InterlockedExchange64(&temporal->nr_total_us, static_cast<LONG64>(timing.total_us));
                     InterlockedExchange64(&temporal->nr_input_us, static_cast<LONG64>(timing.input_us));
@@ -204,6 +204,8 @@ int wmain(int argc, wchar_t** argv)
                     InterlockedExchange64(&temporal->nr_gpu_execute_us, static_cast<LONG64>(timing.gpu_execute_us));
                     InterlockedExchange64(&temporal->nr_bridge_output_us, static_cast<LONG64>(timing.bridge_output_us));
                     InterlockedExchange64(&temporal->nr_correction_output_us, static_cast<LONG64>(timing.correction_output_us));
+                    InterlockedIncrement64(&temporal->worker_processed_frames);
+                    output_completed = true;
                     if (!signaled) { SetEvent(ready); signaled = true; }
                 } else if (++consecutive_failures >= 3 && adapter->state_code() == 2) {
                     adapter_error_message = adapter->error_message();
@@ -216,7 +218,9 @@ int wmain(int argc, wchar_t** argv)
                     consecutive_failures = 0;
                 }
             }
-            output_mutex->ReleaseSync(1);
+            // Key 1 publishes a completed result. Skipped/failed input must
+            // return key 0 to the producer, not masquerade as new NR output.
+            output_mutex->ReleaseSync(output_completed ? 1 : 0);
         }
     }
     InterlockedExchange(&temporal->worker_adapter_state, 0);

@@ -1,4 +1,5 @@
 #include "nr_adapter_api.hpp"
+#include "nr_temporal_policy.hpp"
 #include <windows.h>
 #include <d3d11.h>
 #include <d3d11_1.h>
@@ -156,14 +157,17 @@ bool __stdcall process(ID3D11DeviceContext* context, ID3D11Texture2D* texture,
     const auto input_end = TimingClock::now();
     last_timings.input_us = elapsed_us(frame_start, input_end);
 
-    const bool reject_history = (temporal->flags & (temporal_scene_cut | temporal_reject_all)) != 0;
+    // NVOF supplies the NR temporal motion field. The low-resolution CPU
+    // analyzer models translation only, so its reject-all/tile mask can
+    // oscillate during camera rotation and must not gate the NR output.
+    const auto policy = nr_temporal_policy(*temporal);
     char error[1024]{};
     if (!bridge_process(device, context, texture, bgra_input.data(), static_cast<int>(width),
             static_cast<int>(height), temporal->nr_style, temporal->nr_preset,
             temporal->nr_intensity_percent / 100.0f, 1.0f, 1.0f, -1.0f,
-            temporal->nr_automask ? 1 : 0, reject_history ? 1 : 0,
-            (!reject_history && temporal->nr_temporal) ? 1 : 0,
-            temporal->rejection_mask, temporal->mask_columns, temporal->mask_rows,
+            temporal->nr_automask ? 1 : 0, policy.reset_history ? 1 : 0,
+            policy.use_motion_vectors ? 1 : 0,
+            nullptr, 0, 0,
             error, static_cast<int>(sizeof(error)))) {
         set_last_error(error);
         return false;

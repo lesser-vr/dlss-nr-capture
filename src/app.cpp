@@ -126,6 +126,22 @@ int App::run(HINSTANCE instance, int show_command)
 
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+        // Handle the application shortcut before dispatch so combo-box focus
+        // and the default Windows F10 menu behavior cannot swallow it.
+        const bool nr_shortcut = message.wParam == VK_F10 &&
+            (message.hwnd == window_ || IsChild(window_, message.hwnd)) &&
+            (GetKeyState(VK_CONTROL) & 0x8000) == 0 &&
+            (GetKeyState(VK_MENU) & 0x8000) == 0 &&
+            (GetKeyState(VK_SHIFT) & 0x8000) == 0;
+        if (nr_shortcut && (message.message == WM_KEYDOWN ||
+                            message.message == WM_SYSKEYDOWN)) {
+            if ((message.lParam & (1LL << 30)) == 0)
+                set_nr_enabled(!nr_enabled_);
+            continue;
+        }
+        if (nr_shortcut && (message.message == WM_KEYUP ||
+                            message.message == WM_SYSKEYUP))
+            continue;
         if (message.message == WM_MOUSEWHEEL && handle_mode_wheel(message.wParam))
             continue;
         TranslateMessage(&message);
@@ -229,7 +245,7 @@ void App::discover_capture_devices()
     nr_preset_menu_ = CreatePopupMenu();
     nr_intensity_menu_ = CreatePopupMenu();
     nr_latency_menu_ = CreatePopupMenu();
-    AppendMenuW(nr_menu_, MF_STRING | (nr_enabled_ ? MF_CHECKED : 0), nr_enable_command, L"Enable DLSS Neural Rendering");
+    AppendMenuW(nr_menu_, MF_STRING | (nr_enabled_ ? MF_CHECKED : 0), nr_enable_command, L"Toggle DLSS Neural Rendering\tF10");
     AppendMenuW(nr_menu_, MF_STRING | (nr_temporal_enabled_ ? MF_CHECKED : 0), nr_temporal_command, L"Temporal accumulation");
     AppendMenuW(nr_menu_, MF_SEPARATOR, 0, nullptr);
     for (UINT i = 0; i < 4; ++i) {
@@ -641,7 +657,7 @@ std::wstring App::nr_worker_status() const
             ? L"correction active"
             : (renderer_.worker_correction_too_slow()
                 ? L"NR too slow - original only"
-                : L"original only");
+                : (renderer_.worker_preparing() ? L"NR preparing" : L"original only"));
         std::wstring timing;
         if (adapter == 2 && frames) {
             const auto milliseconds = [](volatile LONG64* value) {
@@ -714,7 +730,9 @@ void App::restart_nr_worker(uint32_t width, uint32_t height)
 {
     stop_nr_worker();
     last_worker_restart_ms_ = GetTickCount64();
-    renderer_.configure_shared_output(width, height);
+    const uint32_t fps_numerator = active_mode_ ? modes_[*active_mode_].frame_rate_numerator : 60;
+    const uint32_t fps_denominator = active_mode_ ? modes_[*active_mode_].frame_rate_denominator : 1;
+    renderer_.configure_shared_output(width, height, fps_numerator, fps_denominator);
     SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
     temporal_mapping_ = CreateFileMappingW(INVALID_HANDLE_VALUE, &security, PAGE_READWRITE, 0,
                                            sizeof(WorkerTemporalState), nullptr);
@@ -779,6 +797,7 @@ void App::set_nr_enabled(bool enabled)
     nr_enabled_ = enabled;
     CheckMenuItem(nr_menu_, nr_enable_command, MF_BYCOMMAND | (enabled ? MF_CHECKED : MF_UNCHECKED));
     apply_nr_settings(true);
+    renderer_.show_nr_toggle(enabled);
 }
 void App::set_history_overlay(bool enabled)
 {

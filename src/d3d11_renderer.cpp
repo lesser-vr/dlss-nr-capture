@@ -1,4 +1,5 @@
 #include "d3d11_renderer.hpp"
+#include "nr_notification.hpp"
 
 #include <algorithm>
 #include <d3dcompiler.h>
@@ -10,7 +11,8 @@ D3D11Renderer::~D3D11Renderer()
     if (shared_output_handle_) CloseHandle(shared_output_handle_);
 }
 
-void D3D11Renderer::configure_shared_output(uint32_t width, uint32_t height)
+void D3D11Renderer::configure_shared_output(uint32_t width, uint32_t height,
+                                          uint32_t fps_numerator, uint32_t fps_denominator)
 {
     shared_input_mutex_.Reset();
     shared_input_texture_.Reset();
@@ -57,8 +59,11 @@ void D3D11Renderer::configure_shared_output(uint32_t width, uint32_t height)
     worker_output_frames_ = worker_enhanced_frames_ = worker_fallback_frames_ = 0;
     correction_updated_tick_ms_ = 0;
     worker_processing_time_us_ = 0;
+    correction_processing_ema_us_ = 0;
+    speed_policy_ = nr_speed_policy(fps_numerator, fps_denominator);
+    warmup_gate_ = {};
     correction_fast_updates_ = correction_slow_updates_ = 0;
-    correction_timing_fast_ = false;
+    correction_timing_fast_ = correction_slow_latched_ = false;
     correction_available_ = correction_active_ = false;
 }
 
@@ -118,9 +123,7 @@ void D3D11Renderer::initialize_correction_pipeline()
         "Texture2D<float4> correction : register(t1);"
         "float4 main(float4 position : SV_POSITION) : SV_TARGET {"
         "int2 p = int2(position.xy);"
-        "float4 base = base_frame.Load(int3(p, 0));"
-        "float3 delta = (correction.Load(int3(p, 0)).rgb - 0.5) / 2.0;"
-        "return float4(saturate(base.rgb + delta), 1.0);}";
+        "return float4(correction.Load(int3(p, 0)).rgb, 1.0);}";
     ComPtr<ID3DBlob> vertex_blob, pixel_blob, errors;
     throw_if_failed(D3DCompile(vertex_source, sizeof(vertex_source) - 1, nullptr, nullptr, nullptr,
                                "main", "vs_5_0", 0, 0, &vertex_blob, &errors),
@@ -169,10 +172,32 @@ void D3D11Renderer::initialize_overlay_pipeline()
                     "Create warning text brush");
 }
 
-void D3D11Renderer::draw_speed_warning()
+void D3D11Renderer::draw_status_overlay()
 {
-    if (!d2d_context_ || !d2d_target_ || !worker_correction_too_slow())
-        return;
+    const uint64_t now = GetTickCount64();
+    const float opacity = nr_notification_visible_
+        ? nr_notification_opacity(now - nr_notification_started_ms_) : 0.0f;
+    const bool notification = opacity > 0.0f;
+    const bool preparing = worker_preparing();
+    if (!notification) nr_notification_visible_ = false;
+    if (notification)
+        draw_status_banner(nr_notification_enabled_ ? L"NR ON" : L"NR OFF",
+                           OverlayMessageStyle::information, opacity);
+    else if (preparing)
+        draw_status_banner(L"NR PREPARING", OverlayMessageStyle::information);
+    else if (worker_correction_too_slow())
+        draw_status_banner(L"NR TOO SLOW - SHOWING ORIGINAL VIDEO", OverlayMessageStyle::error);
+}
+
+void D3D11Renderer::draw_status_banner(const std::wstring& message,
+                                      OverlayMessageStyle style, float opacity)
+{
+    if (!d2d_context_ || !d2d_target_) return;
+    const auto palette = overlay_palette(style);
+    opacity = std::clamp(opacity, 0.0f, 1.0f);
+    warning_background_brush_->SetColor(
+        D2D1::ColorF(palette.background_rgb, palette.background_opacity * opacity));
+    warning_text_brush_->SetColor(D2D1::ColorF(palette.text_rgb, opacity));
     context_->OMSetRenderTargets(0, nullptr, nullptr);
     d2d_context_->BeginDraw();
     const D2D1_SIZE_F size = d2d_context_->GetSize();
@@ -181,14 +206,20 @@ void D3D11Renderer::draw_speed_warning()
                                            (size.width + width) * 0.5f, 88.0f);
     d2d_context_->FillRoundedRectangle(D2D1::RoundedRect(banner, 10.0f, 10.0f),
                                        warning_background_brush_.Get());
-    static constexpr wchar_t message[] = L"NR TOO SLOW - SHOWING ORIGINAL VIDEO";
-    d2d_context_->DrawTextW(message, ARRAYSIZE(message) - 1, warning_text_format_.Get(), banner,
+    d2d_context_->DrawTextW(message.c_str(), static_cast<UINT32>(message.size()), warning_text_format_.Get(), banner,
                             warning_text_brush_.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
     const HRESULT result = d2d_context_->EndDraw();
     if (result == D2DERR_RECREATE_TARGET)
         d2d_target_.Reset();
     else
-        throw_if_failed(result, "Draw warning overlay");
+        throw_if_failed(result, "Draw status overlay");
+}
+
+void D3D11Renderer::show_nr_toggle(bool enabled) noexcept
+{
+    nr_notification_enabled_ = enabled;
+    nr_notification_started_ms_ = GetTickCount64();
+    nr_notification_visible_ = true;
 }
 
 void D3D11Renderer::render_with_correction()
@@ -301,14 +332,43 @@ void D3D11Renderer::render(const VideoFrame& frame)
         if (correction_enabled_) {
             context_->CopyResource(correction_texture_.Get(), shared_output_texture_.Get());
             const uint64_t update_tick = GetTickCount64();
-            if (worker_processing_time_us_ && worker_processing_time_us_ <= 15000) {
-                correction_fast_updates_ = std::min(correction_fast_updates_ + 1, 15u);
-                correction_slow_updates_ = 0;
-                if (correction_fast_updates_ >= 15) correction_timing_fast_ = true;
-            } else if (worker_processing_time_us_ >= 20000) {
-                correction_slow_updates_ = std::min(correction_slow_updates_ + 1, 5u);
-                correction_fast_updates_ = 0;
-                if (correction_slow_updates_ >= 5) correction_timing_fast_ = false;
+            // Exclude startup work entirely; seed the EMA only after warmup.
+            if (warmup_gate_.accept_sample(update_tick)) {
+                if (worker_processing_time_us_) {
+                    correction_processing_ema_us_ = correction_processing_ema_us_
+                        ? (correction_processing_ema_us_ * 7 + worker_processing_time_us_) / 8
+                        : worker_processing_time_us_;
+                }
+                if (!correction_timing_fast_) {
+                    if (correction_processing_ema_us_ &&
+                        correction_processing_ema_us_ <= speed_policy_.enable_us) {
+                        correction_fast_updates_ = std::min(correction_fast_updates_ + 1, speed_policy_.fast_samples);
+                        correction_slow_updates_ = 0;
+                        if (correction_fast_updates_ >= speed_policy_.fast_samples) {
+                            correction_timing_fast_ = true;
+                            correction_slow_latched_ = false;
+                        }
+                    } else {
+                        correction_fast_updates_ = 0;
+                        if (correction_processing_ema_us_ >= speed_policy_.slow_us) {
+                            correction_slow_updates_ = std::min(
+                                correction_slow_updates_ + 1, speed_policy_.slow_samples);
+                            if (correction_slow_updates_ >= speed_policy_.slow_samples)
+                                correction_slow_latched_ = true;
+                        } else {
+                            correction_slow_updates_ = 0;
+                        }
+                    }
+                } else if (correction_processing_ema_us_ >= speed_policy_.slow_us) {
+                    correction_slow_updates_ = std::min(correction_slow_updates_ + 1, speed_policy_.slow_samples);
+                    if (correction_slow_updates_ >= speed_policy_.slow_samples) {
+                        correction_timing_fast_ = false;
+                        correction_slow_latched_ = true;
+                        correction_fast_updates_ = 0;
+                    }
+                } else {
+                    correction_slow_updates_ = 0;
+                }
             }
             correction_updated_tick_ms_ = update_tick;
             correction_available_ = true;
@@ -320,7 +380,7 @@ void D3D11Renderer::render(const VideoFrame& frame)
     correction_active_ = correction_enabled_ && correction_available_ &&
         correction_timing_fast_ &&
         now >= correction_updated_tick_ms_ &&
-        now - correction_updated_tick_ms_ <= 40;
+        now - correction_updated_tick_ms_ <= 100;
     if (correction_active_) {
         render_with_correction();
         ++worker_enhanced_frames_;
@@ -328,7 +388,7 @@ void D3D11Renderer::render(const VideoFrame& frame)
         context_->CopyResource(back_buffer.Get(), frame_texture_.Get());
         ++worker_fallback_frames_;
     }
-    draw_speed_warning();
+    draw_status_overlay();
     swap_chain_->Present(0, DXGI_PRESENT_DO_NOT_WAIT);
 }
 

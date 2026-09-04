@@ -1,5 +1,7 @@
 # DLSS NR Capture
 
+NR 켜기/끄기: **F10** 또는 Neural Rendering 메뉴의 **Toggle DLSS Neural Rendering**. 메뉴 체크 표시로 활성 상태를 확인할 수 있으며 설정은 다음 실행에도 유지됩니다.
+
 Windows용 저지연 캡처·Neural Rendering 실험 애플리케이션입니다. 현재 첫 번째
 마일스톤은 캡처 장치에서 프레임을 받아 지연이 누적되지 않는 latest-frame 방식으로
 표시하는 실행 가능한 기반을 제공합니다.
@@ -22,15 +24,17 @@ Windows용 저지연 캡처·Neural Rendering 실험 애플리케이션입니다
 - `nvngx_dlssnr.dll` 누락 시 오류창을 표시하고 패스스루 유지
 - NR 초기화·처리 실패 시 브리지의 상세 오류를 표시하고 안전하게 패스스루로 전환
 - 창 제목에 프레임 도착→표시 지연과 latest-frame 교체 드롭 수 실시간 표시
-- NR 입력·출력 공유 텍스처 분리 및 보정값 합성: 느린 NR 결과의 디테일 보정을 최신 원본에 적용해 정지·깜빡임 방지
-- NR 처리시간이 15회 연속 15ms 이하일 때 보정을 적용하고, 5회 연속 20ms 이상이면 원본으로 복귀하는 히스테리시스로 스케줄링 지터와 깜빡임 방지
+- NR 입력·출력 공유 텍스처 분리 및 프레임 정렬: 실시간 NR 완성 프레임을 직접 표시해 최신 원본과 이전 보정값을 섞을 때 생기는 잔상 방지
+- 선택 FPS에 맞춰 NR 속도 판정 자동 조정: 프레임 예산의 90% 이하에서 활성화, 150% 이상에서 저속 판정. 연속 결과 기준도 FPS에 비례하며 60FPS에서는 기존 30회·15ms / 60회·25ms를 유지. 짧은 갱신 공백에는 마지막 NR 프레임을 최대 100ms 유지
 - NR이 너무 느려 원본으로 복귀한 동안에는 창·전체 화면 영상 위에 경고 오버레이 표시
 - NR 프레임의 입력, Optical Flow, GPU 준비·실행, 출력 단계별 시간을 창 제목에 표시
 - NVOF 축소 Flow를 D3D12 compute shader로 전체 해상도 모션 벡터에 확장해 CPU 병목 제거
-- DLSS readback에서 채널 감지, 잔차 계산, 히스토리 마스크 및 BGRA8 인코딩을 한 번에 처리해 중간 float 출력 제거
+- DLSS readback에서 채널 감지, 히스토리 마스크 및 최종 BGRA8 프레임 생성을 한 번에 처리해 중간 float 출력 제거
 - D3D12가 공유 BGRA8 보정 render target을 생성하고 D3D11 worker가 GPU 복사해 정상 프레임의 CPU readback·재업로드 제거
 - BGRA8 입력을 작은 upload buffer로 전달하고 D3D12 compute shader에서 RGBA16F DLSS 입력으로 변환
 - NVOF는 worker의 D3D11 BGRA 텍스처를 GPU에서 직접 복사해 CPU RGB·luma 변환과 재업로드 제거
+- 카메라 회전은 NVOF temporal motion에 맡기고 CPU 평행이동 분석의 reject-all·타일 마스크를 NR에 적용하지 않아 회전 중 history reset 깜빡임 방지
+- 메뉴처럼 카메라 이동 없이 넓은 화면 영역이 바뀌는 전환은 별도로 감지해 NR history를 한 번만 초기화하고 30프레임 쿨다운으로 반복 reset 방지
 
 기본 처리 백엔드는 `Passthrough`이며, 사용자가 별도 제공한 호환 런타임이 있을 때만
 선택적으로 DLSS Neural Rendering 브리지를 활성화합니다. GPU 작업 프로세스, 공유 텍스처,

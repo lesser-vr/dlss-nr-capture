@@ -50,6 +50,12 @@ public:
         }
 
         if (previous_.size() != current.size() || previous_width_ != width || previous_height_ != height) {
+            // Never expose a valid payload from the previous capture session.
+            {
+                std::scoped_lock lock(payload_mutex_);
+                payload_ = {};
+                payload_.frame_sequence = frame.sequence;
+            }
             previous_ = std::move(current);
             previous_width_ = width;
             previous_height_ = height;
@@ -87,7 +93,30 @@ public:
         double confidence = forward.second < std::numeric_limits<double>::max()
             ? std::clamp((forward.second - forward.best) / std::max(1.0, forward.second) * 4.0, 0.0, 1.0) : 0.0;
         confidence *= std::max(0.0, 1.0 - fb_error / 4.0);
-        const bool cut = forward.best > 42.0;
+        uint32_t current_histogram[16]{}, previous_histogram[16]{};
+        for (size_t i = 0; i < current.size(); ++i) {
+            ++current_histogram[current[i] >> 4];
+            ++previous_histogram[previous_[i] >> 4];
+        }
+        uint64_t histogram_delta = 0;
+        for (size_t i = 0; i < 16; ++i)
+            histogram_delta += static_cast<uint64_t>(
+                std::abs(static_cast<int64_t>(current_histogram[i]) -
+                         static_cast<int64_t>(previous_histogram[i])));
+        const double histogram_change = current.empty() ? 1.0 :
+            static_cast<double>(histogram_delta) / (2.0 * current.size());
+        // A large pixel mismatch alone also occurs during fast camera rotation.
+        // Hard cuts require a strong global histogram change. Menu overlays are
+        // detected separately: they change a substantial part of the image while
+        // the best global camera translation remains near zero.
+        const int translation = std::abs(forward.x) + std::abs(forward.y);
+        const bool hard_cut = forward.best > 42.0 && histogram_change > 0.30;
+        const bool overlay_transition = forward.best > 18.0 &&
+            histogram_change > 0.08 && translation <= 1 && fb_error <= 1;
+        if (transition_cooldown_ > 0) --transition_cooldown_;
+        const bool cut = transition_cooldown_ == 0 &&
+            (hard_cut || overlay_transition);
+        if (cut) transition_cooldown_ = 30;
 
         const int tile_columns = (static_cast<int>(width) + tile_size - 1) / tile_size;
         const int tile_rows = (static_cast<int>(height) + tile_size - 1) / tile_size;
@@ -153,7 +182,12 @@ public:
     }
 
     void reset_history() noexcept override {
+        {
+            std::scoped_lock lock(payload_mutex_);
+            payload_ = {};
+        }
         previous_.clear(); previous_width_ = previous_height_ = 0;
+        transition_cooldown_ = 0;
         ready_.store(false); scene_cut_.store(false);
     }
     void set_debug_overlay(bool enabled) noexcept override { debug_overlay_.store(enabled); }
@@ -175,6 +209,7 @@ public:
 private:
     std::vector<uint8_t> previous_;
     uint32_t previous_width_{}, previous_height_{};
+    uint32_t transition_cooldown_{};
     std::atomic_int motion_x_{}, motion_y_{}, confidence_percent_{};
     std::atomic_int history_rejected_percent_{}, fb_error_{};
     std::atomic_bool scene_cut_{}, ready_{}, debug_overlay_{};

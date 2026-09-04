@@ -605,8 +605,7 @@ float4 ps_main(float4 position : SV_POSITION) : SV_TARGET {
         uint row = min(mask_rows - 1, p.y * mask_rows / height);
         reject = rejection_mask[row * mask_columns + column] != 0;
     }
-    float3 encoded = reject ? 0.5 : saturate(0.5 + (result - base) * 2.0);
-    return float4(encoded, 1.0);
+    return float4(reject ? base : saturate(result), 1.0);
 })";
     ComPtr<ID3DBlob> vertex, pixel, errors;
     HRESULT hr = D3DCompile(shader_source, sizeof(shader_source) - 1, nullptr, nullptr, nullptr,

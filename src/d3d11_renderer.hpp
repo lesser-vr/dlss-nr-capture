@@ -2,6 +2,8 @@
 
 #include "common.hpp"
 #include "frame.hpp"
+#include "nr_speed_policy.hpp"
+#include "overlay_style.hpp"
 
 #include <d3d11.h>
 #include <d2d1_1.h>
@@ -16,7 +18,9 @@ public:
     void resize(uint32_t width, uint32_t height);
     void render(const VideoFrame& frame);
     void clear();
-    void configure_shared_output(uint32_t width, uint32_t height);
+    void show_nr_toggle(bool enabled) noexcept;
+    void configure_shared_output(uint32_t width, uint32_t height,
+                                 uint32_t fps_numerator, uint32_t fps_denominator);
     const std::wstring& shared_texture_name() const noexcept { return shared_texture_name_; }
     HANDLE shared_input_handle() const noexcept { return shared_input_handle_; }
     HANDLE shared_output_handle() const noexcept { return shared_output_handle_; }
@@ -27,8 +31,11 @@ public:
     uint64_t worker_enhanced_frames() const noexcept { return worker_enhanced_frames_; }
     uint64_t worker_fallback_frames() const noexcept { return worker_fallback_frames_; }
     bool worker_correction_active() const noexcept { return correction_active_; }
+    bool worker_preparing() const noexcept {
+        return correction_enabled_ && !correction_timing_fast_ && !correction_slow_latched_;
+    }
     bool worker_correction_too_slow() const noexcept {
-        return correction_enabled_ && correction_available_ && !correction_active_;
+        return correction_enabled_ && correction_available_ && correction_slow_latched_;
     }
     void set_worker_wait_ms(uint32_t value) noexcept { worker_wait_ms_ = value; }
     void set_worker_correction_enabled(bool value) noexcept { correction_enabled_ = value; }
@@ -39,7 +46,9 @@ private:
     void create_back_buffer();
     void initialize_correction_pipeline();
     void initialize_overlay_pipeline();
-    void draw_speed_warning();
+    void draw_status_overlay();
+    void draw_status_banner(const std::wstring& message, OverlayMessageStyle style,
+                            float opacity = 1.0f);
     void render_with_correction();
 
     HWND window_{};
@@ -80,11 +89,18 @@ private:
     uint64_t worker_fallback_frames_{};
     uint64_t correction_updated_tick_ms_{};
     uint64_t worker_processing_time_us_{};
+    uint64_t correction_processing_ema_us_{};
+    NrSpeedPolicy speed_policy_{nr_speed_policy(60, 1)};
+    NrWarmupGate warmup_gate_{};
     uint32_t correction_fast_updates_{};
     uint32_t correction_slow_updates_{};
     bool correction_timing_fast_{};
+    bool correction_slow_latched_{};
     uint32_t worker_wait_ms_{2};
     bool correction_enabled_{};
     bool correction_available_{};
     bool correction_active_{};
+    uint64_t nr_notification_started_ms_{};
+    bool nr_notification_visible_{};
+    bool nr_notification_enabled_{};
 };

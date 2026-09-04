@@ -13,14 +13,18 @@ pipeline.
 - A newly captured frame replaces an unrendered older frame.
 - Rendering runs on the window thread for this milestone.
 - GPU processing runs in a dedicated worker with separate keyed-mutex input and output textures.
-- The worker publishes encoded NR correction data; the renderer applies it to the newest live frame.
-- Corrections are displayed after 15 consecutive NR results at 15 ms or faster and disabled after five consecutive results at 20 ms or slower. This hysteresis absorbs scheduler jitter while keeping sub-realtime output on the original frame; active corrections must remain fresher than 40 ms.
+- The worker publishes the completed NR frame and the renderer displays that temporally aligned result directly instead of adding an older residual to the newest live frame.
+- NR speed thresholds follow the selected rational capture FPS: activate below 90% of the frame budget after ceil(FPS/2) consecutive qualifying EMA samples; latch slow above 150% after ceil(FPS) slow samples. These are result counts, not wall-clock deadlines. At 60 FPS the tested 15/25 ms and 30/60 samples are unchanged. Invalid rates fall back to 60 FPS, and mode changes reset EMA/counters. During brief scheduling gaps the last completed NR frame may be repeated for up to 100 ms instead of flashing back to the live original.
 - The worker publishes per-frame input, optical-flow, GPU preparation/execution, and output timings for live bottleneck diagnosis.
 - Coarse NVOF vectors are uploaded once and expanded into the full-resolution normalized motion-vector texture by a D3D12 compute shader.
-- DLSS readback is converted directly into the encoded BGRA8 correction buffer, combining channel detection, rejection masking, and residual calculation without an intermediate float RGB output.
+- DLSS readback is converted directly into the final BGRA8 output, combining channel detection and rejection masking without an intermediate float RGB output.
 - After one-time channel-order detection, D3D12 renders corrections directly into a shared BGRA8 target. D3D11 opens that target and performs a synchronized GPU copy, avoiding steady-state CPU output readback and upload.
 - BGRA8 input pixels use a compact upload buffer and a D3D12 compute shader converts them directly into the RGBA16F DLSS color texture.
 - NVOF GPU-copies the worker''s D3D11 BGRA texture into its registered ping-pong inputs, eliminating the CPU RGB/luma conversion and upload path.
+- NVOF is authoritative for NR temporal motion. The low-resolution CPU translation model remains diagnostic-only for rejection masks, because applying those masks during camera rotation caused raw/NR oscillation. Hard cuts additionally require a large luminance-histogram change before resetting NR history.
+- Large zero-translation luminance changes, such as opening a game menu, trigger one NR history reset followed by a 30-frame cooldown so menu animations cannot repeatedly reset temporal processing.
+- History resets preserve the user's temporal mode: NVOF primes a new frame pair and NR receives reset with zero motion vectors, without switching feature modes or recreating frame resources.
+- Each worker restart excludes the first two seconds after its first completed output from speed evaluation. The renderer shows NR PREPARING until qualification succeeds or sustained slowness is established; the first post-warmup sample seeds a fresh EMA. Toggle notifications retain display priority.
 
 This intentionally prefers a dropped frame over accumulated input latency.
 
