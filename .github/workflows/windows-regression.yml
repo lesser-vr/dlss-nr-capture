@@ -26,3 +26,6 @@ jobs:
 
       - name: Build and run regression suite
         run: cmake --build build --config Release --target regression --parallel
+
+      - name: Package public binaries
+        run: ./tools/package.ps1 -ReleaseDir ./build/Release -OutputDir ./build/public-package

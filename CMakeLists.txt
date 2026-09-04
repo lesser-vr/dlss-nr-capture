@@ -99,6 +99,9 @@ target_compile_definitions(dlss-nr-benchmark PRIVATE UNICODE _UNICODE NOMINMAX W
 target_compile_options(dlss-nr-benchmark PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(dlss-nr-benchmark PRIVATE d3d11 dxgi mfplat mfreadwrite mfuuid ole32)
 if(BUILD_TESTING)
+    add_test(NAME regression.tools COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
+        -File "${CMAKE_SOURCE_DIR}/tests/tools_smoke.ps1" -SourceDir "${CMAKE_SOURCE_DIR}")
+    set_tests_properties(regression.tools PROPERTIES TIMEOUT 30)
     find_program(BENCHMARK_FFMPEG ffmpeg)
     add_test(NAME regression.benchmark
         COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass

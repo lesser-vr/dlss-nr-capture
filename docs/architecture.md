@@ -48,11 +48,23 @@ vector. A global or multi-plane camera model is used to validate and regularize
 the observed flow. Forward/backward disagreement, disocclusion, scene cuts and
 low-confidence regions reject temporal history.
 
-## Next milestone acceptance criteria
+## Remaining GPU work (not current guarantees)
 
 - Capture remains GPU-native from Media Foundation to D3D12.
 - No CPU pixel round-trip in the steady state.
 - Forward and backward flow plus global-flow metadata are visualizable.
 - Scene cuts reset all temporal hints.
 - Processing timeout falls back to the newest unprocessed frame.
-- End-to-end latency and dropped frames are visible in an on-screen overlay.
+- App-local latency and dropped frames are visible; console-to-display latency requires external measurement.
+
+## Driver operations and audio
+
+Driver calls run on MTA threads while a restricted UI message loop handles
+window management. User commands/timers cannot reenter device state. Threads
+are not detached: an explicit close during a blocked call terminates this app,
+and post-window shutdown has a five-second deadline. This is not driver-level
+cancellation or automatic isolation of a faulty kernel driver.
+
+Audio uses a bounded delayed-packet queue and a 200ms waveOut backlog ceiling.
+Selectable positive audio delay is manual synchronization assistance, not
+timestamp-locked A/V playback. See README for settings, local logs and packaging.
