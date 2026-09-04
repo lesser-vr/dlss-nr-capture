@@ -1,7 +1,12 @@
 #include "frame_processor.hpp"
+#include "audio_output_checks.hpp"
+#include "audio_health.hpp"
+#include "device_refresh.hpp"
 #include "diagnostics_report.hpp"
 #include "frame_rate_meter.hpp"
 #include "benchmark_stats.hpp"
+#include "worker_health.hpp"
+#include "capture_health.hpp"
 #include "quality_metrics.hpp"
 #include "worker_job.hpp"
 #include "nr_adapter_api.hpp"
@@ -28,6 +33,56 @@ VideoFrame solid(uint32_t width, uint32_t height, uint8_t value, uint64_t sequen
 }
 
 int wmain(int argc, wchar_t** argv) {
+    check_audio_output(check);
+    check(!audio_retry_due(4999, 0, true), "audio recovery backoff");
+    check(audio_retry_due(5000, 0, true), "audio failure triggers recovery");
+    check(!audio_retry_due(10000, 0, false), "healthy audio does not reconnect");
+    check(!audio_retry_due(100, 200, true), "audio recovery guards clock reversal");
+    check(audio_endpoint_matches(L"endpoint-A", L"endpoint-A"), "audio exact endpoint recovery");
+    check(!audio_endpoint_matches(L"endpoint-A", L"endpoint-B"), "audio refuses other endpoints");
+    check(!audio_endpoint_matches(L"", L""), "audio requires a nonempty identity");
+    struct SavedAudioTestDevice { std::wstring id, name; };
+    const std::vector<SavedAudioTestDevice> audio_devices = {
+        {L"A", L"Capture"}, {L"B", L"Capture"}, {L"C", L"Unique"}
+    };
+    check(audio_restore_index(audio_devices, L"B", L"Capture") == 1, "saved ID disambiguates audio names");
+    check(audio_restore_index(audio_devices, L"B", L"Old name") == 1, "saved audio ID survives rename");
+    check(audio_restore_index(audio_devices, L"Missing", L"Unique") == 3, "saved audio ID never falls back to name");
+    check(audio_restore_index(audio_devices, L"", L"Unique") == 2, "unique legacy audio name migrates");
+    check(audio_restore_index(audio_devices, L"", L"Capture") == 3, "ambiguous legacy audio waits for selection");
+    check(audio_restore_index(audio_devices, L"", L"") == 3, "audio Off does not choose an endpoint");
+    const auto audio_key = [](const auto& device) { return device.id; };
+    std::vector<SavedAudioTestDevice> refreshed = {audio_devices[2], audio_devices[1], audio_devices[0]};
+    check(remap_selected_device(audio_devices, refreshed, 0, audio_key) == 2,
+          "device refresh preserves selected identity when enumeration order changes");
+    refreshed = {audio_devices[2]};
+    check(remap_selected_device(audio_devices, refreshed, 0, audio_key) == 1 &&
+          refreshed[1].id == L"A", "missing selected video retained for live session and reconnect");
+    check(!remap_selected_device(audio_devices, refreshed, std::nullopt, audio_key),
+          "device refresh never automatically selects an input");
+    check(!capture_retry_due(4999, 0, 0, 0, true), "capture recovery backoff");
+    check(capture_retry_due(5000, 0, 0, 0, true), "capture error retries without waiting for frames");
+    check(!capture_retry_due(7999, 0, 0, 0, false), "capture startup grace");
+    check(capture_retry_due(8000, 0, 0, 0, false), "capture no-frame timeout");
+    check(!capture_retry_due(20000, 0, 19900, 0, false), "no-signal image with arriving frames is healthy");
+    check(capture_retry_due(20000, 0, 10000, 0, false), "capture stalled frames trigger recovery");
+    check(!capture_retry_due(100, 0, 0, 200, true), "capture retry guards clock reversal");
+    check(!capture_input_interrupted(7999, 0, 0, false), "input banner honors startup grace");
+    check(capture_input_interrupted(8000, 0, 0, false), "input banner after startup timeout");
+    check(!capture_input_interrupted(2999, 0, 1000, false), "brief input gap has no banner");
+    check(capture_input_interrupted(3000, 0, 1000, false), "stalled input gets banner");
+    check(!capture_input_interrupted(3000, 0, 2999, false), "fresh frames clear input banner");
+    check(capture_input_interrupted(1000, 0, 999, true), "capture error immediately gets banner");
+    check(!capture_input_interrupted(1000, 0, 2000, false), "input banner guards clock reversal");
+    check(!worker_needs_restart(4999, 0, false, false, 0), "watchdog restart backoff");
+    check(worker_needs_restart(5000, 0, false, false, 0), "watchdog retries failed process creation");
+    check(worker_needs_restart(5000, 0, true, true, 0), "watchdog recovers exited worker without frames");
+    check(!worker_needs_restart(29999, 0, true, false, 0), "watchdog allows cold initialization");
+    check(worker_needs_restart(30000, 0, true, false, 0), "watchdog detects missing initial heartbeat");
+    check(!worker_needs_restart(10000, 0, true, false, 8000), "watchdog heartbeat boundary");
+    check(worker_needs_restart(10001, 0, true, false, 8000), "watchdog detects stale heartbeat");
+    check(!worker_needs_restart(10000, 0, true, false, 9900), "idle healthy worker is not restarted");
+    check(!worker_needs_restart(100, 200, true, true, 0), "watchdog guards clock reversal");
     check(quality_mae({0, 20, 255}, {0, 20, 255}) == 0, "identical quality proxies have zero difference");
     check(quality_mae({0, 0, 0}, {30, 30, 30}) == 30, "quality MAE scale is 0-255");
     check(quality_residual_change({50}, {30}, {40}, {20}) == 0, "constant enhancement tracks source without residual flicker");

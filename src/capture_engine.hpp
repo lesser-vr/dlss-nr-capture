@@ -15,6 +15,7 @@
 
 struct CaptureDevice {
     std::wstring name;
+    std::wstring symbolic_link;
     ComPtr<IMFActivate> activation;
 };
 

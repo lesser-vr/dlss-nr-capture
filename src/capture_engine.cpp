@@ -82,6 +82,13 @@ std::vector<CaptureDevice> CaptureEngine::enumerate_devices()
         }
         CaptureDevice entry;
         entry.name = std::move(name);
+        WCHAR* link = nullptr;
+        UINT32 link_length = 0;
+        if (SUCCEEDED(raw_devices[i]->GetAllocatedString(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK,
+                                                         &link, &link_length))) {
+            entry.symbolic_link.assign(link, link_length);
+            CoTaskMemFree(link);
+        }
         entry.activation.Attach(raw_devices[i]);
         devices.push_back(std::move(entry));
     }

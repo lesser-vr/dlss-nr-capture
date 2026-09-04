@@ -18,6 +18,8 @@ public:
     void resize(uint32_t width, uint32_t height);
     void render(const VideoFrame& frame);
     void clear();
+    void redraw_idle();
+    void set_capture_interrupted(bool value) noexcept { capture_interrupted_ = value; }
     void show_nr_toggle(bool enabled);
     void show_notification(const std::wstring& message);
     void set_performance_text(const std::wstring& text) { performance_text_ = text; }
@@ -100,6 +102,7 @@ private:
     bool correction_enabled_{};
     bool correction_available_{};
     bool correction_active_{};
+    bool capture_interrupted_{};
     uint64_t nr_notification_started_ms_{};
     bool nr_notification_visible_{};
     std::wstring notification_message_;

@@ -1,5 +1,9 @@
 #include "app.hpp"
 #include "diagnostics_report.hpp"
+#include "worker_health.hpp"
+#include "capture_health.hpp"
+#include "audio_health.hpp"
+#include "device_refresh.hpp"
 #include <cstring>
 #include <iomanip>
 #include <sstream>
@@ -14,6 +18,11 @@ namespace {
 constexpr wchar_t window_class[] = L"DlssNrCaptureWindow";
 constexpr UINT frame_ready_message = WM_APP + 1;
 constexpr UINT status_changed_message = WM_APP + 2;
+constexpr UINT capture_failed_message = WM_APP + 3;
+constexpr UINT audio_failed_message = WM_APP + 4;
+constexpr UINT test_capture_failure_message = WM_APP + 42;
+constexpr UINT test_audio_failure_message = WM_APP + 43;
+constexpr UINT_PTR health_timer_id = 1;
 constexpr UINT device_command_base = 41000;
 constexpr UINT mode_command_base = 42000;
 constexpr UINT mode_combo_id = 43000;
@@ -28,6 +37,7 @@ constexpr UINT always_on_top_command = 49001;
 constexpr UINT auto_size_command = 49002;
 constexpr UINT diagnostics_command = 49003;
 constexpr UINT performance_command = 49004;
+constexpr UINT refresh_devices_command = 49005;
 constexpr UINT passthrough_command = 50000;
 constexpr UINT motion_analysis_command = 50001;
 constexpr UINT history_overlay_command = 50002;
@@ -124,7 +134,14 @@ int App::run(HINSTANCE instance, int show_command)
     renderer_.initialize(window_);
     renderer_.clear();
     load_settings();
+    // Only isolated regression settings may enable frame suppression.
+    if (settings_key_path().rfind(L"Software\\DlssNrCapture\\Tests\\", 0) == 0) {
+        isolated_test_settings_ = true;
+        wchar_t value[2]{};
+        suppress_test_frames_ = GetEnvironmentVariableW(L"DLSS_NR_TEST_SUPPRESS_FRAMES", value, 2) == 1 && value[0] == L'1';
+    }
     discover_capture_devices();
+    if (!SetTimer(window_, health_timer_id, 500, nullptr)) throw std::runtime_error("Start worker health timer failed");
     ShowWindow(window_, show_command);
     resize_window_to_capture();
     set_always_on_top(always_on_top_);
@@ -180,6 +197,9 @@ void App::load_settings()
     saved_device_name_ = read_string(L"VideoDevice");
     saved_format_ = read_string(L"VideoFormat");
     saved_audio_name_ = read_string(L"AudioDevice");
+    reconnect_audio_id_ = read_string(L"AudioDeviceId");
+    reconnect_audio_name_ = saved_audio_name_;
+    audio_expected_ = !reconnect_audio_id_.empty() || !reconnect_audio_name_.empty();
     read_dword(L"Width", saved_width_);
     read_dword(L"Height", saved_height_);
     read_dword(L"FpsNumerator", saved_fps_numerator_);
@@ -213,7 +233,8 @@ void App::save_settings()
         RegSetValueExW(key, name, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&value), sizeof(value));
     };
     write_string(L"VideoDevice", active_device_ ? devices_[*active_device_].name : L"");
-    write_string(L"AudioDevice", active_audio_device_ ? audio_devices_[*active_audio_device_].name : L"");
+    write_string(L"AudioDevice", audio_expected_ ? reconnect_audio_name_ : L"");
+    write_string(L"AudioDeviceId", audio_expected_ ? reconnect_audio_id_ : L"");
     if (active_mode_) {
         const auto& mode = modes_[*active_mode_];
         write_string(L"VideoFormat", mode.format_name);
@@ -238,6 +259,11 @@ void App::save_settings()
 void App::discover_capture_devices()
 {
     devices_ = CaptureEngine::enumerate_devices();
+    if (isolated_test_settings_) {
+        wchar_t value[2]{};
+        if (GetEnvironmentVariableW(L"DLSS_NR_TEST_NO_VIDEO", value, 2) == 1 && value[0] == L'1')
+            devices_.clear();
+    }
     audio_devices_ = AudioCapture::enumerate_devices();
     menu_bar_ = CreateMenu();
     device_menu_ = CreatePopupMenu();
@@ -288,6 +314,7 @@ void App::discover_capture_devices()
     AppendMenuW(view_menu_, MF_STRING, diagnostics_command, L"Copy diagnostics to clipboard");
     AppendMenuW(view_menu_, MF_STRING | (performance_overlay_ ? MF_CHECKED : 0),
                 performance_command, L"Performance overlay");
+    AppendMenuW(view_menu_, MF_STRING, refresh_devices_command, L"Refresh devices");
     audio_menu_ = CreatePopupMenu();
     AppendMenuW(audio_menu_, MF_STRING | MF_CHECKED, audio_off_command, L"Off");
     for (size_t index = 0; index < audio_devices_.size(); ++index)
@@ -307,6 +334,17 @@ void App::discover_capture_devices()
     AppendMenuW(menu_bar_, MF_POPUP, reinterpret_cast<UINT_PTR>(view_menu_), L"View");
     SetMenu(window_, menu_bar_);
     renderer_.set_worker_wait_ms(nr_wait_ms_);
+    // Restore before video selection can save settings, including audio-only startup.
+    if (audio_expected_) {
+        const size_t index = audio_restore_index(audio_devices_, reconnect_audio_id_, reconnect_audio_name_);
+        if (index < audio_devices_.size()) start_audio_capture(index, true);
+        else {
+            audio_failed_ = true;
+            last_audio_retry_ms_ = GetTickCount64();
+            audio_recovery_error_ = L"Saved audio input is missing or ambiguous; waiting for matching device";
+            rebuild_audio_menu();
+        }
+    }
     restoring_settings_ = false;
 
     if (devices_.empty()) {
@@ -323,26 +361,112 @@ void App::discover_capture_devices()
     }
     start_capture_device(preferred);
     if (has_saved_flip_) set_vertical_flip(saved_flip_);
-    if (!saved_audio_name_.empty()) {
-        for (size_t index = 0; index < audio_devices_.size(); ++index)
-            if (audio_devices_[index].name == saved_audio_name_) { start_audio_capture(index); break; }
+}
+
+void App::rebuild_audio_menu()
+{
+    while (GetMenuItemCount(audio_menu_) > 0) DeleteMenu(audio_menu_, 0, MF_BYPOSITION);
+    AppendMenuW(audio_menu_, MF_STRING | (!audio_expected_ ? MF_CHECKED : 0), audio_off_command, L"Off");
+    for (size_t index = 0; index < audio_devices_.size(); ++index)
+        AppendMenuW(audio_menu_, MF_STRING | (active_audio_device_ && *active_audio_device_ == index ? MF_CHECKED : 0),
+                    audio_command_base + static_cast<UINT>(index), audio_devices_[index].name.c_str());
+    if (audio_expected_ && !active_audio_device_)
+        AppendMenuW(audio_menu_, MF_STRING | MF_GRAYED, 0, (L"Waiting: " + reconnect_audio_name_).c_str());
+    DrawMenuBar(window_);
+}
+
+void App::refresh_capture_devices()
+{
+    try {
+        // Enumerate both lists before committing either; never restart a live
+        // capture or worker simply because the user refreshed the menus.
+        auto video = CaptureEngine::enumerate_devices();
+        auto audio = AudioCapture::enumerate_devices();
+        const auto video_selected = remap_selected_device(devices_, video, active_device_,
+            [](const auto& device) { return device.symbolic_link; });
+        std::optional<size_t> audio_selected;
+        if (active_audio_device_) {
+            const size_t index = audio_restore_index(audio, reconnect_audio_id_, reconnect_audio_name_);
+            if (index < audio.size()) audio_selected = index;
+        }
+        const bool audio_missing = active_audio_device_.has_value() && !audio_selected;
+        devices_ = std::move(video);
+        audio_devices_ = std::move(audio);
+        active_device_ = video_selected;
+        active_audio_device_ = audio_selected;
+        if (audio_missing && audio_expected_) {
+            audio_failed_ = true;
+            audio_recovery_error_ = L"Selected audio input is not detected";
+        }
+        while (GetMenuItemCount(device_menu_) > 0) DeleteMenu(device_menu_, 0, MF_BYPOSITION);
+        for (size_t i = 0; i < devices_.size(); ++i)
+            AppendMenuW(device_menu_, MF_STRING | (active_device_ && *active_device_ == i ? MF_CHECKED : 0),
+                        device_command_base + static_cast<UINT>(i), devices_[i].name.c_str());
+        rebuild_audio_menu();
+        if (!active_device_) status_ = devices_.empty() ? L"No capture device found" : L"Select a capture device";
+        renderer_.show_notification(L"DEVICE LIST UPDATED");
+        update_title();
+    } catch (const std::exception& error) {
+        show_error(L"Cannot refresh devices: " + widen(error.what()));
     }
 }
 
-void App::start_audio_capture(size_t index)
+void App::start_audio_capture(size_t index, bool reconnecting)
 {
+    if (!reconnecting) {
+        audio_expected_ = false;
+        reconnect_audio_id_.clear();
+        reconnect_audio_name_.clear();
+        audio_recovery_error_.clear();
+    }
+    const uint64_t generation = ++audio_generation_;
     audio_capture_->stop();
     if (active_audio_device_) CheckMenuItem(audio_menu_, audio_command_base + static_cast<UINT>(*active_audio_device_), MF_BYCOMMAND | MF_UNCHECKED);
     active_audio_device_.reset();
     CheckMenuItem(audio_menu_, audio_off_command, MF_BYCOMMAND | (index >= audio_devices_.size() ? MF_CHECKED : MF_UNCHECKED));
-    if (index >= audio_devices_.size()) { save_settings(); return; }
-    audio_capture_->start(audio_devices_[index], [this](std::wstring error) {
+    audio_failed_ = false;
+    if (index >= audio_devices_.size()) { rebuild_audio_menu(); save_settings(); return; }
+    audio_expected_ = true;
+    reconnect_audio_id_ = audio_devices_[index].id;
+    reconnect_audio_name_ = audio_devices_[index].name;
+    last_audio_retry_ms_ = GetTickCount64();
+    try {
+    audio_capture_->start(audio_devices_[index], [this, generation](std::wstring error) {
         auto* text = new std::wstring(std::move(error));
-        if (!PostMessageW(window_, status_changed_message, 0, reinterpret_cast<LPARAM>(text))) delete text;
+        if (!PostMessageW(window_, audio_failed_message, static_cast<WPARAM>(generation), reinterpret_cast<LPARAM>(text))) delete text;
     });
+    audio_recovery_error_.clear();
+    } catch (const std::exception& error) {
+        audio_failed_ = true;
+        audio_recovery_error_ = widen(error.what());
+    }
     active_audio_device_ = index;
-    CheckMenuItem(audio_menu_, audio_command_base + static_cast<UINT>(index), MF_BYCOMMAND | MF_CHECKED);
+    rebuild_audio_menu();
     save_settings();
+}
+
+void App::ensure_audio_health()
+{
+    if (!audio_expected_) return;
+    const uint64_t now = GetTickCount64();
+    if (!audio_retry_due(now, last_audio_retry_ms_, audio_failed_)) return;
+    last_audio_retry_ms_ = now;
+    ++audio_recovery_attempts_;
+    ++audio_generation_;
+    audio_capture_->stop();
+    try {
+        auto discovered = AudioCapture::enumerate_devices();
+        const size_t index = audio_restore_index(discovered, reconnect_audio_id_, reconnect_audio_name_);
+        audio_devices_ = std::move(discovered);
+        active_audio_device_.reset();
+        rebuild_audio_menu();
+        if (index == audio_devices_.size())
+            throw std::runtime_error("Selected audio device is missing or ambiguous");
+        start_audio_capture(index, true);
+    } catch (const std::exception& error) {
+        audio_failed_ = true;
+        audio_recovery_error_ = widen(error.what());
+    }
 }
 
 void App::rebuild_mode_menu()
@@ -494,7 +618,11 @@ void App::toggle_fullscreen()
 void App::start_capture_device(size_t index)
 {
     if (index >= devices_.size()) return;
+    capture_expected_ = false;
+    worker_expected_ = false;
+    ++capture_generation_;
     capture_->stop();
+    stop_nr_worker();
     active_mode_.reset();
     modes_.clear();
     status_ = L"Reading modes: " + devices_[index].name;
@@ -589,7 +717,12 @@ void App::start_capture_frame_rate(size_t index)
 }void App::start_capture_mode(size_t index)
 {
     if (!active_device_ || index >= modes_.size()) return;
+    const uint64_t generation = ++capture_generation_;
+    if (!reconnecting_capture_) capture_expected_ = false;
+    capture_failed_ = false;
+    worker_expected_ = false;
     capture_->stop();
+    stop_nr_worker();
     {
         std::scoped_lock lock(frame_mutex_);
         pending_frame_.reset();
@@ -601,17 +734,25 @@ void App::start_capture_frame_rate(size_t index)
     renderer_.set_performance_text(performance_overlay_ ? L"Measuring performance..." : L"");
     last_present_latency_ms_ = 0;
     processor_->reset_history();
-    set_vertical_flip(modes_[index].format_name == L"RGB24");
+    if (!reconnecting_capture_) set_vertical_flip(modes_[index].format_name == L"RGB24");
     status_ = L"Opening " + modes_[index].display_name();
     update_title();
     try {
+        capture_started_ms_ = last_capture_retry_ms_ = GetTickCount64();
+        last_capture_frame_ms_.store(0);
         capture_->start(devices_[*active_device_], modes_[index],
-            [this](VideoFrame&& frame) { enqueue_frame(std::move(frame)); },
-            [this](std::wstring error) {
+            [this, generation](VideoFrame&& frame) {
+                if (generation == capture_generation_.load()) enqueue_frame(std::move(frame));
+            },
+            [this, generation](std::wstring error) {
                 auto* message = new std::wstring(std::move(error));
-                if (!PostMessageW(window_, status_changed_message, 0, reinterpret_cast<LPARAM>(message)))
+                if (!PostMessageW(window_, capture_failed_message, static_cast<WPARAM>(generation), reinterpret_cast<LPARAM>(message)))
                     delete message;
             });
+        capture_expected_ = true;
+        reconnect_mode_ = modes_[index];
+        reconnect_device_link_ = devices_[*active_device_].symbolic_link;
+        capture_recovery_error_.clear();
         if (active_mode_)
             CheckMenuItem(mode_menu_, mode_command_base + static_cast<UINT>(*active_mode_),
                           MF_BYCOMMAND | MF_UNCHECKED);
@@ -633,7 +774,11 @@ void App::start_capture_frame_rate(size_t index)
                           static_cast<uint64_t>(modes_[index].frame_rate_numerator) * frame_rates_[rate_index].second ? MF_CHECKED : MF_UNCHECKED));        status_ = L"Live: " + devices_[*active_device_].name + L" — " + modes_[index].display_name();
         save_settings();
     } catch (const std::exception& error) {
-        show_error(L"Cannot open mode: " + widen(error.what()));
+        if (reconnecting_capture_) {
+            capture_failed_ = true;
+            capture_recovery_error_ = widen(error.what());
+            status_ = L"Capture reconnect pending: " + capture_recovery_error_;
+        } else show_error(L"Cannot open mode: " + widen(error.what()));
     }
     update_title();
 }
@@ -706,22 +851,69 @@ std::wstring App::nr_worker_status() const
     return L"GPU worker starting";
 }
 
+void App::ensure_capture_health()
+{
+    if (!capture_expected_ || !active_device_ || !reconnect_mode_) return;
+    const uint64_t now = GetTickCount64();
+    if (!capture_retry_due(now, capture_started_ms_, last_capture_frame_ms_.load(),
+                           last_capture_retry_ms_, capture_failed_)) return;
+    last_capture_retry_ms_ = now;
+    ++capture_recovery_attempts_;
+    ++capture_generation_; // Ignore queued errors/frames belonging to the old session.
+    capture_->stop();
+    worker_expected_ = false;
+    stop_nr_worker();
+    status_ = L"Waiting to reconnect capture device";
+    try {
+        if (reconnect_device_link_.empty()) throw std::runtime_error("Device has no stable identity; select it manually");
+        const auto discovered = CaptureEngine::enumerate_devices();
+        const auto device = std::find_if(discovered.begin(), discovered.end(), [&](const auto& value) {
+            return value.symbolic_link == reconnect_device_link_;
+        });
+        if (device == discovered.end()) throw std::runtime_error("Selected device is not connected");
+        auto available = CaptureEngine::enumerate_modes(*device);
+        const auto wanted = *reconnect_mode_;
+        const auto mode = std::find_if(available.begin(), available.end(), [&](const auto& value) {
+            return value.supported && value.subtype == wanted.subtype && value.width == wanted.width &&
+                value.height == wanted.height && value.frame_rate_denominator && wanted.frame_rate_denominator &&
+                static_cast<uint64_t>(value.frame_rate_numerator) * wanted.frame_rate_denominator ==
+                static_cast<uint64_t>(wanted.frame_rate_numerator) * value.frame_rate_denominator;
+        });
+        const size_t index = static_cast<size_t>(mode - available.begin());
+        devices_[*active_device_] = *device;
+        modes_ = std::move(available);
+        active_mode_.reset();
+        rebuild_mode_menu();
+        if (index == modes_.size()) throw std::runtime_error("Previous capture mode is unavailable; select a mode manually");
+        reconnecting_capture_ = true;
+        start_capture_mode(index);
+        reconnecting_capture_ = false;
+    } catch (const std::exception& error) {
+        reconnecting_capture_ = false;
+        capture_failed_ = true;
+        capture_recovery_error_ = widen(error.what());
+        status_ = L"Capture reconnect pending: " + capture_recovery_error_;
+    }
+}
+
 void App::ensure_nr_worker_health()
 {
-    if (!active_mode_ || !worker_process_.hProcess) return;
+    if (!worker_expected_ || !active_mode_) return;
     const uint64_t now = GetTickCount64();
     DWORD exit_code = STILL_ACTIVE;
-    const bool exited = GetExitCodeProcess(worker_process_.hProcess, &exit_code) && exit_code != STILL_ACTIVE;
+    const bool exited = worker_process_.hProcess && GetExitCodeProcess(worker_process_.hProcess, &exit_code) && exit_code != STILL_ACTIVE;
     uint64_t heartbeat = 0;
     if (temporal_state_) heartbeat = static_cast<uint64_t>(
         InterlockedCompareExchange64(&temporal_state_->worker_heartbeat_ms, 0, 0));
-    const bool timed_out = heartbeat && now - heartbeat > 2000;
-    if ((exited || timed_out) && now - last_worker_restart_ms_ > 2000) {
+    if (worker_needs_restart(now, last_worker_restart_ms_, worker_process_.hProcess != nullptr, exited, heartbeat)) {
         last_worker_restart_ms_ = now;
+        ++worker_recovery_attempts_;
         try {
             const auto& mode = modes_[*active_mode_];
             restart_nr_worker(mode.width, mode.height);
-        } catch (...) {
+            worker_restart_error_.clear();
+        } catch (const std::exception& error) {
+            worker_restart_error_ = widen(error.what());
             stop_nr_worker();
         }
     }
@@ -738,6 +930,7 @@ void App::stop_nr_worker()
         CloseHandle(worker_process_.hThread);
         worker_process_ = {};
     }
+    std::scoped_lock temporal_lock(temporal_mutex_);
     if (temporal_state_) { UnmapViewOfFile(temporal_state_); temporal_state_ = nullptr; }
     if (temporal_mapping_) { CloseHandle(temporal_mapping_); temporal_mapping_ = nullptr; }
 }
@@ -745,11 +938,14 @@ void App::stop_nr_worker()
 void App::restart_nr_worker(uint32_t width, uint32_t height)
 {
     stop_nr_worker();
+    worker_expected_ = true;
     last_worker_restart_ms_ = GetTickCount64();
     const uint32_t fps_numerator = active_mode_ ? modes_[*active_mode_].frame_rate_numerator : 60;
     const uint32_t fps_denominator = active_mode_ ? modes_[*active_mode_].frame_rate_denominator : 1;
     renderer_.configure_shared_output(width, height, fps_numerator, fps_denominator);
     SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+    {
+    std::scoped_lock temporal_lock(temporal_mutex_);
     temporal_mapping_ = CreateFileMappingW(INVALID_HANDLE_VALUE, &security, PAGE_READWRITE, 0,
                                            sizeof(WorkerTemporalState), nullptr);
     if (!temporal_mapping_) throw std::runtime_error("Create temporal metadata mapping failed");
@@ -762,6 +958,7 @@ void App::restart_nr_worker(uint32_t width, uint32_t height)
     InterlockedExchange(&temporal_state_->nr_preset, static_cast<LONG>(nr_preset_));
     InterlockedExchange(&temporal_state_->nr_intensity_percent, static_cast<LONG>(nr_intensity_percent_));
     InterlockedExchange(&temporal_state_->nr_temporal, nr_temporal_enabled_ ? 1 : 0);
+    }
     wchar_t module[MAX_PATH]{};
     GetModuleFileNameW(nullptr, module, MAX_PATH);
     std::wstring worker_path = module;
@@ -783,6 +980,7 @@ void App::restart_nr_worker(uint32_t width, uint32_t height)
         worker_job_.assign(worker_process_.hProcess);
         if (ResumeThread(worker_process_.hThread) == static_cast<DWORD>(-1))
             throw std::runtime_error("Resume GPU worker failed");
+        worker_restart_error_.clear();
     } catch (...) {
         stop_nr_worker();
         throw;
@@ -835,6 +1033,8 @@ void App::set_history_overlay(bool enabled)
 
 void App::enqueue_frame(VideoFrame&& frame)
 {
+    last_capture_frame_ms_.store(GetTickCount64());
+    if (suppress_test_frames_) return;
     if (flip_vertical_.load(std::memory_order_relaxed) && frame.height > 1) {
         const size_t row_bytes = static_cast<size_t>(frame.width) * 4;
         for (uint32_t top = 0, bottom = frame.height - 1; top < bottom; ++top, --bottom)
@@ -843,12 +1043,15 @@ void App::enqueue_frame(VideoFrame&& frame)
                              frame.bgra.begin() + static_cast<size_t>(bottom) * row_bytes);
     }
     if (!processor_->process(frame)) return;
+    {
+    std::scoped_lock temporal_lock(temporal_mutex_);
     if (temporal_state_) {
         const TemporalAnalysisPayload payload = processor_->temporal_state();
         InterlockedIncrement(&temporal_state_->sequence);
         temporal_state_->payload = payload;
         MemoryBarrier();
         InterlockedIncrement(&temporal_state_->sequence);
+    }
     }
     received_frames_.fetch_add(1, std::memory_order_relaxed);
     {
@@ -865,6 +1068,9 @@ void App::update_title()
     const std::string details = processor_->diagnostics();
     if (!details.empty()) title += L" — " + widen(details);
     title += L" — " + nr_worker_status();
+    if (capture_recovery_attempts_) title += L" | capture reconnects " + std::to_wstring(capture_recovery_attempts_);
+    if (audio_expected_ && audio_failed_) title += L" | Audio reconnect pending: " + audio_recovery_error_;
+    if (audio_recovery_attempts_) title += L" | audio reconnects " + std::to_wstring(audio_recovery_attempts_);
     const uint64_t received = received_frames_.load(std::memory_order_relaxed);
     const uint64_t dropped = dropped_frames_.load(std::memory_order_relaxed);
     if (received) {
@@ -880,7 +1086,7 @@ void App::update_performance_overlay()
     capture_rate_.observe(now, received_frames_.load());
     worker_rate_.observe(now, renderer_.worker_output_frames());
     if (!present_rate_.observe(now, displayed_frames_) || !performance_overlay_) return;
-    const wchar_t* state = !nr_enabled_ ? L"OFF" : renderer_.worker_correction_active() ? L"ACTIVE"
+    const wchar_t* state = capture_interrupted_ ? L"INPUT LOST" : !nr_enabled_ ? L"OFF" : renderer_.worker_correction_active() ? L"ACTIVE"
         : renderer_.worker_correction_too_slow() ? L"TOO SLOW"
         : renderer_.worker_preparing() ? L"PREPARING" : L"ORIGINAL";
     std::wostringstream text;
@@ -888,7 +1094,8 @@ void App::update_performance_overlay()
          << L"Capture " << capture_rate_.fps() << L" | Present " << present_rate_.fps() << L" FPS\n"
          << L"Worker " << worker_rate_.fps() << L" FPS | NR " << state << L"\n"
          << L"NR EMA " << renderer_.worker_average_processing_us() / 1000.0 << L" ms\n"
-         << L"App latency " << last_present_latency_ms_ << L" ms | Dropped " << dropped_frames_.load();
+         << L"App latency " << (capture_interrupted_ ? L"N/A" : std::to_wstring(last_present_latency_ms_) + L" ms")
+         << L" | Dropped " << dropped_frames_.load();
     renderer_.set_performance_text(text.str());
 }
 
@@ -916,6 +1123,14 @@ void App::copy_diagnostics()
     report.add(L"Dropped frames", dropped_frames_.load());
     report.add(L"Present latency ms", last_present_latency_ms_);
     report.add(L"Worker", nr_worker_status());
+    report.add(L"Automatic worker recovery attempts", worker_recovery_attempts_);
+    report.add(L"Last worker restart error", worker_restart_error_);
+    report.add(L"Capture reconnect attempts", capture_recovery_attempts_);
+    report.add(L"Capture input state", capture_interrupted_ ? L"Interrupted" : L"No interruption detected");
+    report.add(L"Last capture recovery error", capture_recovery_error_);
+    report.add(L"Audio selected", audio_expected_ ? reconnect_audio_name_ : L"Off");
+    report.add(L"Audio reconnect attempts", audio_recovery_attempts_);
+    report.add(L"Last audio recovery error", audio_recovery_error_);
     report.add(L"Processing EMA us", renderer_.worker_average_processing_us());
     report.add(L"Enable threshold us", policy.enable_us);
     report.add(L"Slow threshold us", policy.slow_us);
@@ -997,6 +1212,20 @@ LRESULT CALLBACK App::combo_proc(HWND window, UINT message, WPARAM wparam, LPARA
 LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 {
     switch (message) {
+    case WM_TIMER:
+        if (wparam == health_timer_id) {
+            capture_interrupted_ = capture_expected_ && capture_input_interrupted(
+                GetTickCount64(), capture_started_ms_, last_capture_frame_ms_.load(), capture_failed_);
+            renderer_.set_capture_interrupted(capture_interrupted_);
+            update_performance_overlay();
+            if (capture_interrupted_) renderer_.redraw_idle();
+            ensure_capture_health();
+            ensure_audio_health();
+            ensure_nr_worker_health();
+            update_title();
+            return 0;
+        }
+        break;
     case frame_ready_message: {
         std::optional<VideoFrame> frame;
         { std::scoped_lock lock(frame_mutex_); frame.swap(pending_frame_); }
@@ -1008,6 +1237,8 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
                 ? static_cast<uint64_t>(InterlockedCompareExchange64(
                     &temporal_state_->nr_total_us, 0, 0)) : 0;
             renderer_.set_worker_processing_time_us(nr_processing_us);
+            capture_interrupted_ = capture_failed_;
+            renderer_.set_capture_interrupted(capture_interrupted_);
             renderer_.render(*frame);
             const uint64_t now = GetTickCount64();
             last_present_latency_ms_ = frame->arrival_tick_ms && now >= frame->arrival_tick_ms
@@ -1015,7 +1246,6 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             ++displayed_frames_;
             update_performance_overlay();
             if (displayed_frames_ % 15 == 0) update_title();
-            if (displayed_frames_ % 60 == 0) ensure_nr_worker_health();
         }
         return 0;
     }
@@ -1024,6 +1254,44 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         if (error) show_error(*error);
         return 0;
     }
+    case capture_failed_message: {
+        std::unique_ptr<std::wstring> error(reinterpret_cast<std::wstring*>(lparam));
+        if (error && static_cast<uint64_t>(wparam) == capture_generation_.load()) {
+            capture_failed_ = true;
+            capture_recovery_error_ = *error;
+            status_ = L"Capture interrupted; reconnect pending: " + *error;
+            update_title();
+        }
+        return 0;
+    }
+    case test_capture_failure_message:
+        if (isolated_test_settings_) {
+            if (wparam == 1) return capture_interrupted_ ? 1 : 0;
+            capture_failed_ = true;
+            last_capture_retry_ms_ = GetTickCount64();
+        }
+        return 0;
+    case audio_failed_message: {
+        std::unique_ptr<std::wstring> error(reinterpret_cast<std::wstring*>(lparam));
+        if (error && static_cast<uint64_t>(wparam) == audio_generation_.load() && audio_expected_) {
+            audio_failed_ = true;
+            audio_recovery_error_ = *error;
+            update_title();
+        }
+        return 0;
+    }
+    case test_audio_failure_message:
+        if (isolated_test_settings_) {
+            if (wparam == 1) return audio_expected_ ? 1 : 0;
+            if (wparam == 2) return static_cast<LRESULT>(audio_recovery_attempts_);
+            // No real recording/output: only exercise missing-endpoint recovery.
+            start_audio_capture(audio_devices_.size());
+            audio_expected_ = audio_failed_ = true;
+            reconnect_audio_id_ = L"DLSS-NR-REGRESSION-NONEXISTENT-ENDPOINT";
+            reconnect_audio_name_ = L"Regression missing audio";
+            last_audio_retry_ms_ = 0;
+        }
+        return 0;
     case WM_MOUSEWHEEL: {
         POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
         RECT combo_rect{}; GetWindowRect(mode_combo_, &combo_rect);
@@ -1069,6 +1337,7 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         if (command == always_on_top_command) { set_always_on_top(!always_on_top_); return 0; }
         if (command == auto_size_command) { set_auto_size_to_resolution(!auto_size_to_resolution_); return 0; }
         if (command == diagnostics_command) { copy_diagnostics(); return 0; }
+        if (command == refresh_devices_command) { refresh_capture_devices(); return 0; }
         if (command == performance_command) {
             performance_overlay_ = !performance_overlay_;
             CheckMenuItem(view_menu_, performance_command, MF_BYCOMMAND | (performance_overlay_ ? MF_CHECKED : MF_UNCHECKED));
@@ -1126,7 +1395,7 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     case WM_PAINT: {
         PAINTSTRUCT paint{}; BeginPaint(window, &paint); EndPaint(window, &paint); return 0;
     }
-    case WM_DESTROY: PostQuitMessage(0); return 0;
+    case WM_DESTROY: KillTimer(window, health_timer_id); PostQuitMessage(0); return 0;
     default: break;
     }
     return DefWindowProcW(window, message, wparam, lparam);

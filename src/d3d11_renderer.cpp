@@ -174,6 +174,10 @@ void D3D11Renderer::initialize_overlay_pipeline()
 void D3D11Renderer::draw_status_overlay()
 {
     draw_performance_overlay();
+    if (capture_interrupted_) {
+        draw_status_banner(L"CAPTURE INTERRUPTED - WAITING FOR INPUT", OverlayMessageStyle::error);
+        return;
+    }
     const uint64_t now = GetTickCount64();
     const float opacity = nr_notification_visible_
         ? nr_notification_opacity(now - nr_notification_started_ms_) : 0.0f;
@@ -388,4 +392,23 @@ void D3D11Renderer::clear()
     constexpr float color[] = {0.015f, 0.018f, 0.024f, 1.0f};
     context_->ClearRenderTargetView(render_target_.Get(), color);
     swap_chain_->Present(1, 0);
+}
+
+void D3D11Renderer::redraw_idle()
+{
+    if (!swap_chain_ || !render_target_) return;
+    // Repaint cached original pixels only: never resubmit input or count this as a video frame.
+    correction_active_ = false;
+    ComPtr<ID3D11Texture2D> buffer;
+    throw_if_failed(swap_chain_->GetBuffer(0, IID_PPV_ARGS(&buffer)), "Get idle back buffer");
+    D3D11_TEXTURE2D_DESC desc{};
+    buffer->GetDesc(&desc);
+    if (frame_texture_ && desc.Width == frame_width_ && desc.Height == frame_height_) {
+        context_->CopyResource(buffer.Get(), frame_texture_.Get());
+    } else {
+        constexpr float color[] = {0.015f, 0.018f, 0.024f, 1.0f};
+        context_->ClearRenderTargetView(render_target_.Get(), color);
+    }
+    draw_status_overlay();
+    swap_chain_->Present(0, DXGI_PRESENT_DO_NOT_WAIT);
 }

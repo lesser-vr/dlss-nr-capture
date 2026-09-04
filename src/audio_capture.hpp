@@ -8,7 +8,7 @@
 #include <string>
 #include <thread>
 #include <vector>
-struct AudioCaptureDevice { std::wstring name; ComPtr<IMMDevice> device; };
+struct AudioCaptureDevice { std::wstring name; std::wstring id; ComPtr<IMMDevice> device; };
 class AudioCapture final {
 public:
  using ErrorCallback = std::function<void(std::wstring)>;
