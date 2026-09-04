@@ -184,6 +184,9 @@ try {
   Assert-MenuCommand $restoredView 49002 $true
   Assert-MenuCommand $restoredView 49003 $false
   Assert-MenuCommand $restoredView 49004 $true
+  $restoredAudioMenu = [RegressionUi]::GetSubMenu($restoredMenu,$labels.IndexOf('Audio capture'))
+  Assert-MenuCommand $restoredAudioMenu 48012 $true
+  if ((Get-ItemProperty -LiteralPath $keyPs).AudioDelayMs -ne 50) { throw 'Audio delay was not restored' }
   [void][RegressionUi]::PostMessage([IntPtr]$script:app.MainWindowHandle,0x802C,[IntPtr]::Zero,[IntPtr]::Zero)
   for ($i=0; $i -lt 40; $i++) {
     Start-Sleep -Milliseconds 100

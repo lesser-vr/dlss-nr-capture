@@ -6,6 +6,7 @@
 #include "frame_processor.hpp"
 #include "frame_rate_meter.hpp"
 #include "worker_job.hpp"
+#include "event_log.hpp"
 
 #include <atomic>
 #include <memory>
@@ -57,6 +58,7 @@ private:
     void show_error(const std::wstring& message);
 
     HWND window_{};
+    EventLog event_log_;
     HWND mode_label_{};
     HMENU menu_bar_{};
     HMENU view_menu_{};

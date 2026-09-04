@@ -2,6 +2,8 @@
 #include "audio_output_checks.hpp"
 #include "audio_health.hpp"
 #include "device_refresh.hpp"
+#include "event_log.hpp"
+#include <filesystem>
 #include "diagnostics_report.hpp"
 #include "frame_rate_meter.hpp"
 #include "benchmark_stats.hpp"
@@ -34,6 +36,18 @@ VideoFrame solid(uint32_t width, uint32_t height, uint8_t value, uint64_t sequen
 
 int wmain(int argc, wchar_t** argv) {
     check_audio_output(check);
+    {
+        wchar_t temp[MAX_PATH]{}; GetTempPathW(MAX_PATH, temp);
+        const auto folder = std::filesystem::path(temp) / (L"dlss-log-test-" + std::to_wstring(GetCurrentProcessId()));
+        std::filesystem::create_directories(folder);
+        EventLog log; log.set_path((folder / L"events.log").wstring(), 100);
+        check(log.append(L"First recovery event"), "event log writes");
+        check(log.append(L"Second recovery event that rotates the log"), "event log rotates");
+        check(std::filesystem::exists(folder / L"events.log.previous"), "event log retains prior segment");
+        std::filesystem::remove_all(folder);
+        log.set_path((folder / L"missing" / L"events.log").wstring());
+        check(!log.append(L"error"), "event log failure is nonfatal");
+    }
     check(!audio_retry_due(4999, 0, true), "audio recovery backoff");
     check(audio_retry_due(5000, 0, true), "audio failure triggers recovery");
     check(!audio_retry_due(10000, 0, false), "healthy audio does not reconnect");

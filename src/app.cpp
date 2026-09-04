@@ -143,6 +143,16 @@ int App::run(HINSTANCE instance, int show_command)
         wchar_t value[2]{};
         suppress_test_frames_ = GetEnvironmentVariableW(L"DLSS_NR_TEST_SUPPRESS_FRAMES", value, 2) == 1 && value[0] == L'1';
     }
+    if (!isolated_test_settings_) {
+        wchar_t root[32768]{};
+        const DWORD count = GetEnvironmentVariableW(L"LOCALAPPDATA", root, 32768);
+        if (count > 0 && count < 32768) {
+            const std::wstring folder = std::wstring(root) + L"\\DlssNrCapture";
+            CreateDirectoryW(folder.c_str(), nullptr);
+            event_log_.set_path(folder + L"\\capture.log");
+            event_log_.append(L"Application started");
+        }
+    }
     discover_capture_devices();
     if (!SetTimer(window_, health_timer_id, 500, nullptr)) throw std::runtime_error("Start worker health timer failed");
     ShowWindow(window_, show_command);
@@ -177,6 +187,7 @@ int App::run(HINSTANCE instance, int show_command)
     driver_call(window_, [&] { audio_capture_->stop(); });
     stop_nr_worker();
     capture_.reset();
+    event_log_.append(L"Application stopped");
     audio_capture_.reset();
     CoUninitialize();
     return static_cast<int>(message.wParam);
@@ -480,6 +491,7 @@ void App::ensure_audio_health()
     if (!audio_retry_due(now, last_audio_retry_ms_, audio_failed_)) return;
     last_audio_retry_ms_ = now;
     ++audio_recovery_attempts_;
+    event_log_.append(L"Audio recovery attempt " + std::to_wstring(audio_recovery_attempts_));
     ++audio_generation_;
     driver_call(window_, [&] { audio_capture_->stop(); });
     try {
@@ -887,6 +899,7 @@ void App::ensure_capture_health()
                            last_capture_retry_ms_, capture_failed_)) return;
     last_capture_retry_ms_ = now;
     ++capture_recovery_attempts_;
+    event_log_.append(L"Capture recovery attempt " + std::to_wstring(capture_recovery_attempts_));
     ++capture_generation_; // Ignore queued errors/frames belonging to the old session.
     driver_call(window_, [&] { capture_->stop(); });
     worker_expected_ = false;
@@ -939,6 +952,7 @@ void App::ensure_capture_health()
         reconnecting_capture_ = false;
         capture_failed_ = true;
         capture_recovery_error_ = widen(error.what());
+        event_log_.append(L"Capture recovery failed: " + capture_recovery_error_);
         status_ = L"Capture reconnect pending: " + capture_recovery_error_;
     }
 }
@@ -955,6 +969,7 @@ void App::ensure_nr_worker_health()
     if (worker_needs_restart(now, last_worker_restart_ms_, worker_process_.hProcess != nullptr, exited, heartbeat)) {
         last_worker_restart_ms_ = now;
         ++worker_recovery_attempts_;
+        event_log_.append(L"NR worker recovery attempt " + std::to_wstring(worker_recovery_attempts_));
         try {
             const auto& mode = modes_[*active_mode_];
             restart_nr_worker(mode.width, mode.height);
@@ -1179,6 +1194,7 @@ void App::copy_diagnostics()
     report.add(L"Audio delay ms", audio_delay_ms_);
     report.add(L"Audio reconnect attempts", audio_recovery_attempts_);
     report.add(L"Last audio recovery error", audio_recovery_error_);
+    report.add(L"Event log", event_log_.path());
     report.add(L"Processing EMA us", renderer_.worker_average_processing_us());
     report.add(L"Enable threshold us", policy.enable_us);
     report.add(L"Slow threshold us", policy.slow_us);
@@ -1224,6 +1240,7 @@ void App::copy_diagnostics()
 
 void App::show_error(const std::wstring& message)
 {
+    event_log_.append(L"Error: " + message);
     status_ = message;
     update_title();
     MessageBoxW(window_, message.c_str(), L"DLSS NR Capture error", MB_OK | MB_ICONERROR);
@@ -1312,6 +1329,7 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         if (error && static_cast<uint64_t>(wparam) == capture_generation_.load()) {
             capture_failed_ = true;
             capture_recovery_error_ = *error;
+            event_log_.append(L"Capture error: " + *error);
             status_ = L"Capture interrupted; reconnect pending: " + *error;
             update_title();
         }
@@ -1329,6 +1347,7 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         if (error && static_cast<uint64_t>(wparam) == audio_generation_.load() && audio_expected_) {
             audio_failed_ = true;
             audio_recovery_error_ = *error;
+            event_log_.append(L"Audio error: " + *error);
             update_title();
         }
         return 0;
