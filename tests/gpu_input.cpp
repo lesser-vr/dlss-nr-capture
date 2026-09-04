@@ -97,11 +97,15 @@ int wmain(int argc, wchar_t** argv) {
             ComPtr<ID3D12Resource> readback;
             throw_if_failed(device12->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &buffer,
                 D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback)), "Create test readback");
-            for (UINT frame = 0; frame < 4; ++frame) {
+            for (UINT frame = 0; frame < 16; ++frame) {
                 std::vector<uint32_t> pixels(width * height);
                 for (UINT i = 0; i < width * height; ++i) pixels[i] = 0xff000000u | (frame << 16) | i;
                 context->UpdateSubresource(source.Get(), 0, nullptr, pixels.data(), width * 4, 0);
-                throw_if_failed(shared.copy_from(device12.Get(), device11.Get(), context.Get(), source.Get()), "Shared GPU copy");
+                // Exercise both queue-fence and bounded-query fallback paths.
+                throw_if_failed(shared.copy_from(device12.Get(), device11.Get(), context.Get(), source.Get(),
+                    frame % 2 ? queue.Get() : nullptr), "Shared GPU copy");
+                if (frame % 2 && !shared.gpu_fence_available())
+                    throw std::runtime_error("WARP shared fence path was not exercised");
                 throw_if_failed(allocator->Reset(), "Reset allocator");
                 throw_if_failed(commands->Reset(allocator.Get(), nullptr), "Reset list");
                 D3D12_RESOURCE_BARRIER barrier{}; barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;

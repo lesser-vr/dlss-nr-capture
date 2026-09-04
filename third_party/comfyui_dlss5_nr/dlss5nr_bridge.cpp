@@ -1230,7 +1230,11 @@ __declspec(dllexport) int __cdecl dlss5nr_process(
     }
 
     const auto input_start = TimingClock::now();
-    const HRESULT input_result = g_shared_input.copy_from(g_device.Get(), input_device, input_context, input_texture);
+    ID3D12CommandQueue* input_consumer = nullptr;
+#if defined(DLSS_NR_EXPERIMENTAL_GPU_FENCE_INPUT)
+    input_consumer = g_queue.Get();
+#endif
+    const HRESULT input_result = g_shared_input.copy_from(g_device.Get(), input_device, input_context, input_texture, input_consumer);
     g_timings.input_us = ElapsedUs(input_start, TimingClock::now());
     if (FAILED(input_result)) {
         SetError("Shared GPU input copy failed: 0x%08X", static_cast<unsigned>(input_result));

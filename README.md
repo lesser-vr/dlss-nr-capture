@@ -173,6 +173,12 @@ GitHub Actions는 `lfs: true`로 영상까지 체크아웃합니다. LFS 다운�
 
 ### 자동 회귀 검사
 
+GPU fence 입력 전달 실험은 `DLSS_NR_EXPERIMENTAL_GPU_FENCE_INPUT` CMake 옵션으로
+분리했습니다(기본 OFF). 픽셀 일치 테스트는 통과했지만 전체 NR 처리시간 개선은
+확인되지 않아 기본 동기화 경로는 유지합니다. 측정 결과는
+[GPU fence 평가](docs/gpu-fence-evaluation.md), 이후 작업 순서는
+[작업 계획](docs/roadmap.md)을 참조하세요.
+
 NR 워커→D3D12 입력은 공유 GPU 텍스처로 전달하며 정상 처리 중 CPU 픽셀 왕복을 하지 않습니다.
 첫 프레임의 출력 채널 순서 판별에는 CPU 참조 픽셀이 필요합니다. 공유 입력 복사는
 완료 확인 후 사용하고, D3D12 처리 완료 후 재사용하는 직렬 경로입니다.

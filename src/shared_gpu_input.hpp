@@ -1,6 +1,7 @@
 #pragma once
 #include "common.hpp"
 #include <d3d11_1.h>
+#include <d3d11_4.h>
 #include <d3d12.h>
 
 // Single-slot handoff. Caller must finish D3D12 work and return the resource to
@@ -22,8 +23,9 @@ public:
             D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&resource_));
     }
     HRESULT copy_from(ID3D12Device* device12, ID3D11Device* device11,
-                      ID3D11DeviceContext* context, ID3D11Texture2D* source) {
-        if (!resource_ || !source || !context || !device11) return E_INVALIDARG;
+                      ID3D11DeviceContext* context, ID3D11Texture2D* source,
+                      ID3D12CommandQueue* consumer_queue = nullptr) {
+        if (!resource_ || !source || !context || !device11 || !device12) return E_INVALIDARG;
         if (FAILED(copy_failure_)) return copy_failure_;
         D3D11_TEXTURE2D_DESC source_desc{};
         source->GetDesc(&source_desc);
@@ -45,7 +47,31 @@ public:
             hr = device11->CreateQuery(&query, &copy_done_);
             if (FAILED(hr)) { texture_.Reset(); return hr; }
         }
+        if (consumer_queue && !fence_attempted_) {
+            fence_attempted_ = true;
+            ComPtr<ID3D11Device5> device5;
+            if (SUCCEEDED(device11->QueryInterface(IID_PPV_ARGS(&device5))) &&
+                SUCCEEDED(context->QueryInterface(IID_PPV_ARGS(&context4_))) &&
+                SUCCEEDED(device12->CreateFence(0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(&fence12_)))) {
+                HANDLE handle{};
+                if (SUCCEEDED(device12->CreateSharedHandle(fence12_.Get(), nullptr, GENERIC_ALL, nullptr, &handle))) {
+                    device5->OpenSharedFence(handle, IID_PPV_ARGS(&fence11_));
+                    CloseHandle(handle);
+                }
+            }
+            if (!fence11_) { fence12_.Reset(); context4_.Reset(); }
+        }
         context->CopyResource(texture_.Get(), source);
+        if (consumer_queue && fence11_) {
+            // Queue ordering replaces CPU polling. The caller still waits for
+            // all D3D12 work before the next copy/reset (single-slot ownership).
+            const UINT64 value = ++fence_value_;
+            HRESULT hr = context4_->Signal(fence11_.Get(), value);
+            context->Flush();
+            if (SUCCEEDED(hr)) hr = consumer_queue->Wait(fence12_.Get(), value);
+            if (FAILED(hr)) copy_failure_ = hr;
+            return hr;
+        }
         context->End(copy_done_.Get());
         context->Flush();
         const ULONGLONG deadline = GetTickCount64() + 1000;
@@ -60,10 +86,20 @@ public:
         }
     }
     ID3D12Resource* resource() const noexcept { return resource_.Get(); }
-    void reset() noexcept { copy_done_.Reset(); texture_.Reset(); resource_.Reset(); copy_failure_ = S_OK; }
+    bool gpu_fence_available() const noexcept { return fence11_ != nullptr; }
+    void reset() noexcept {
+        fence11_.Reset(); fence12_.Reset(); context4_.Reset();
+        fence_attempted_ = false; fence_value_ = 0;
+        copy_done_.Reset(); texture_.Reset(); resource_.Reset(); copy_failure_ = S_OK;
+    }
 private:
     HRESULT copy_failure_{S_OK};
     ComPtr<ID3D12Resource> resource_;
     ComPtr<ID3D11Texture2D> texture_;
     ComPtr<ID3D11Query> copy_done_;
+    ComPtr<ID3D11DeviceContext4> context4_;
+    ComPtr<ID3D11Fence> fence11_;
+    ComPtr<ID3D12Fence> fence12_;
+    bool fence_attempted_{};
+    UINT64 fence_value_{};
 };

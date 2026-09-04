@@ -55,6 +55,10 @@ add_library(dlss5nr-runtime-bridge SHARED
     third_party/comfyui_dlss5_nr/nvof_flow.cpp
 )
 target_include_directories(dlss5nr-runtime-bridge PRIVATE third_party/comfyui_dlss5_nr src)
+option(DLSS_NR_EXPERIMENTAL_GPU_FENCE_INPUT "Use experimental GPU-queue input handoff" OFF)
+if(DLSS_NR_EXPERIMENTAL_GPU_FENCE_INPUT)
+    target_compile_definitions(dlss5nr-runtime-bridge PRIVATE DLSS_NR_EXPERIMENTAL_GPU_FENCE_INPUT=1)
+endif()
 target_compile_options(dlss5nr-runtime-bridge PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(dlss5nr-runtime-bridge PRIVATE d3d12 d3d11 d3dcompiler dxgi ole32)
 set_target_properties(dlss5nr-runtime-bridge PROPERTIES
