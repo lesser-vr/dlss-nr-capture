@@ -1,6 +1,8 @@
 #include "frame_processor.hpp"
 #include "diagnostics_report.hpp"
 #include "frame_rate_meter.hpp"
+#include "benchmark_stats.hpp"
+#include "quality_metrics.hpp"
 #include "worker_job.hpp"
 #include "nr_adapter_api.hpp"
 #include "nr_notification.hpp"
@@ -26,6 +28,17 @@ VideoFrame solid(uint32_t width, uint32_t height, uint8_t value, uint64_t sequen
 }
 
 int wmain(int argc, wchar_t** argv) {
+    check(quality_mae({0, 20, 255}, {0, 20, 255}) == 0, "identical quality proxies have zero difference");
+    check(quality_mae({0, 0, 0}, {30, 30, 30}) == 30, "quality MAE scale is 0-255");
+    check(quality_residual_change({50}, {30}, {40}, {20}) == 0, "constant enhancement tracks source without residual flicker");
+    check(quality_residual_change({70}, {30}, {40}, {20}) == 20, "enhancement jump changes temporal residual");
+    const auto empty_stats = benchmark_stats({});
+    check(empty_stats.mean == 0 && empty_stats.p99 == 0, "empty benchmark statistics");
+    std::vector<uint64_t> ordered_samples;
+    for (uint64_t i = 100; i > 0; --i) ordered_samples.push_back(i);
+    const auto stats = benchmark_stats(ordered_samples);
+    check(stats.mean == 50.5 && stats.p95 == 95 && stats.p99 == 99 && stats.maximum == 100,
+          "benchmark statistics use nearest-rank percentiles");
     if (argc == 2 && std::wstring(argv[1]) == L"--job-probe") {
         Sleep(30000); // Bounded fallback if the lifetime guard fails.
         return 0;

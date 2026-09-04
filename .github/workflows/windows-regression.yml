@@ -18,6 +18,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v5
+        with:
+          lfs: true
 
       - name: Configure
         run: cmake -S . -B build -G "Visual Studio 18 2026" -A x64

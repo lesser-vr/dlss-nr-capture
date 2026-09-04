@@ -35,6 +35,7 @@ D3D11_TEXTURE2D_DESC input_description{};
 std::vector<uint8_t> bgra_input;
 std::wstring last_error_message;
 NrTimingSnapshot last_timings{};
+bool needs_channel_reference{true};
 
 using TimingClock = std::chrono::steady_clock;
 uint64_t elapsed_us(TimingClock::time_point start, TimingClock::time_point end)
@@ -72,6 +73,7 @@ std::wstring module_directory()
 
 bool __stdcall initialize(ID3D11Device* supplied_device, const D3D11_TEXTURE2D_DESC* description)
 {
+    needs_channel_reference = true;
     last_error_message.clear();
     if (!supplied_device || !description || description->Format != DXGI_FORMAT_B8G8R8A8_UNORM) {
         last_error_message = L"Unsupported D3D11 device or texture format";
@@ -141,19 +143,22 @@ bool __stdcall initialize(ID3D11Device* supplied_device, const D3D11_TEXTURE2D_D
 bool __stdcall process(ID3D11DeviceContext* context, ID3D11Texture2D* texture,
                        const TemporalAnalysisPayload* temporal)
 {
-    if (!context || !texture || !temporal || !staging || !bridge_process) return false;
+    if (!context || !texture || !temporal || !bridge_process) return false;
     const auto frame_start = TimingClock::now();
     last_timings = {};
-    context->CopyResource(staging, texture);
-    D3D11_MAPPED_SUBRESOURCE mapped{};
-    if (FAILED(context->Map(staging, 0, D3D11_MAP_READ, 0, &mapped))) return false;
     const uint32_t width = input_description.Width, height = input_description.Height;
-    for (uint32_t y = 0; y < height; ++y) {
-        const auto* row = static_cast<const uint8_t*>(mapped.pData) + static_cast<size_t>(y) * mapped.RowPitch;
-        memcpy(bgra_input.data() + static_cast<size_t>(y) * width * 4, row,
-               static_cast<size_t>(width) * 4);
+    // CPU pixels are needed only for the first output channel-order calibration.
+    if (needs_channel_reference) {
+        context->CopyResource(staging, texture);
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if (FAILED(context->Map(staging, 0, D3D11_MAP_READ, 0, &mapped))) return false;
+        for (uint32_t y = 0; y < height; ++y) {
+            const auto* row = static_cast<const uint8_t*>(mapped.pData) + static_cast<size_t>(y) * mapped.RowPitch;
+            memcpy(bgra_input.data() + static_cast<size_t>(y) * width * 4, row,
+                   static_cast<size_t>(width) * 4);
+        }
+        context->Unmap(staging, 0);
     }
-    context->Unmap(staging, 0);
     const auto input_end = TimingClock::now();
     last_timings.input_us = elapsed_us(frame_start, input_end);
 
@@ -162,7 +167,7 @@ bool __stdcall process(ID3D11DeviceContext* context, ID3D11Texture2D* texture,
     // oscillate during camera rotation and must not gate the NR output.
     const auto policy = nr_temporal_policy(*temporal);
     char error[1024]{};
-    if (!bridge_process(device, context, texture, bgra_input.data(), static_cast<int>(width),
+    if (!bridge_process(device, context, texture, needs_channel_reference ? bgra_input.data() : nullptr, static_cast<int>(width),
             static_cast<int>(height), temporal->nr_style, temporal->nr_preset,
             temporal->nr_intensity_percent / 100.0f, 1.0f, 1.0f, -1.0f,
             temporal->nr_automask ? 1 : 0, policy.reset_history ? 1 : 0,
@@ -173,8 +178,11 @@ bool __stdcall process(ID3D11DeviceContext* context, ID3D11Texture2D* texture,
         return false;
     }
     const auto bridge_end = TimingClock::now();
+    needs_channel_reference = false;
+    if (staging) { staging->Release(); staging = nullptr; }
+    std::vector<uint8_t>().swap(bgra_input);
     bridge_get_timings(&last_timings);
-    last_timings.input_us = elapsed_us(frame_start, input_end);
+    last_timings.input_us += elapsed_us(frame_start, input_end);
     last_error_message.clear();
 
     context->CopyResource(texture, gpu_correction);

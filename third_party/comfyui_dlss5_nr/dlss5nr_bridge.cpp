@@ -22,6 +22,7 @@
 
 #include "nvof_flow.h"
 #include "nr_adapter_api.hpp"
+#include "shared_gpu_input.hpp"
 
 using Microsoft::WRL::ComPtr;
 using NGXResult = int;
@@ -130,7 +131,7 @@ static NGXParameter* g_params = nullptr;
 static NGXHandle* g_feature = nullptr;
 static ComPtr<ID3D12Resource> g_color;
 static ComPtr<ID3D12Resource> g_output;
-static ComPtr<ID3D12Resource> g_upload;
+static SharedGpuInput g_shared_input;
 static ComPtr<ID3D12Resource> g_readback;
 static ComPtr<ID3D12Resource> g_correction_target;
 static ComPtr<ID3D12Resource> g_rejection_mask_upload;
@@ -480,17 +481,14 @@ static bool CreateMotionVectorDescriptors() {
 static bool EnsureInputPipeline() {
     if (g_input_pipeline && g_input_root_signature) return true;
     static constexpr char shader_source[] = R"(
-StructuredBuffer<uint> capture_frame : register(t0);
+Texture2D<float4> capture_frame : register(t0);
 RWTexture2D<float4> dlss_color : register(u0);
 cbuffer Dimensions : register(b0) { uint width; uint height; };
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
     if (id.x >= width || id.y >= height) return;
-    uint packed = capture_frame[id.y * width + id.x];
-    float b = (packed & 255) / 255.0;
-    float g = ((packed >> 8) & 255) / 255.0;
-    float r = ((packed >> 16) & 255) / 255.0;
-    dlss_color[id.xy] = float4(r, g, b, 1.0);
+    // A BGRA typed SRV returns logical RGBA components.
+    dlss_color[id.xy] = float4(capture_frame.Load(int3(id.xy, 0)).rgb, 1.0);
 })";
     ComPtr<ID3DBlob> shader, errors;
     HRESULT hr = D3DCompile(shader_source, sizeof(shader_source) - 1, nullptr, nullptr, nullptr,
@@ -534,7 +532,7 @@ void main(uint3 id : SV_DispatchThreadID) {
 }
 
 static bool CreateInputDescriptors() {
-    if (!g_upload || !g_color || !EnsureInputPipeline()) return false;
+    if (!g_shared_input.resource() || !g_color || !EnsureInputPipeline()) return false;
     D3D12_DESCRIPTOR_HEAP_DESC heap{};
     heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     heap.NumDescriptors = 2;
@@ -545,12 +543,11 @@ static bool CreateInputDescriptors() {
     const UINT stride = g_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     D3D12_CPU_DESCRIPTOR_HANDLE handle = g_input_descriptors->GetCPUDescriptorHandleForHeapStart();
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-    srv.Format = DXGI_FORMAT_UNKNOWN;
-    srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+    srv.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    srv.Buffer.NumElements = g_width * g_height;
-    srv.Buffer.StructureByteStride = sizeof(uint32_t);
-    g_device->CreateShaderResourceView(g_upload.Get(), &srv, handle);
+    srv.Texture2D.MipLevels = 1;
+    g_device->CreateShaderResourceView(g_shared_input.resource(), &srv, handle);
     handle.ptr += stride;
     D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
     uav.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -561,6 +558,9 @@ static bool CreateInputDescriptors() {
 
 static bool RecordInputConversion() {
     if (!g_input_descriptors) { SetError("Shared GPU input is not configured"); return false; }
+    auto input_read = Barrier(g_shared_input.resource(), D3D12_RESOURCE_STATE_COMMON,
+                              D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    g_cmd->ResourceBarrier(1, &input_read);
     auto to_write = Barrier(g_color.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     g_cmd->ResourceBarrier(1, &to_write);
@@ -575,6 +575,9 @@ static bool RecordInputConversion() {
     const UINT dimensions[] = {g_width, g_height};
     g_cmd->SetComputeRoot32BitConstants(2, 2, dimensions, 0);
     g_cmd->Dispatch((g_width + 7) / 8, (g_height + 7) / 8, 1);
+    auto input_release = Barrier(g_shared_input.resource(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                 D3D12_RESOURCE_STATE_COMMON);
+    g_cmd->ResourceBarrier(1, &input_release);
     auto restore = Barrier(g_color.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     g_cmd->ResourceBarrier(1, &restore);
@@ -812,7 +815,7 @@ static void ReleaseFeatureAndResources() {
 
     g_input_descriptors.Reset();
     g_correction_descriptors.Reset(); g_correction_rtv_heap.Reset();
-    g_color.Reset(); g_output.Reset(); g_upload.Reset(); g_readback.Reset();
+    g_color.Reset(); g_output.Reset(); g_shared_input.reset(); g_readback.Reset();
     g_mvec.Reset(); g_mvec_upload.Reset(); g_mvec_descriptors.Reset();
     g_width = g_height = g_row_pitch = 0;
     g_total_bytes = 0;
@@ -834,9 +837,11 @@ static bool AllocateFrameResources(UINT w, UINT h, bool use_motion_vectors) {
 
     g_row_pitch = (w * 8u + 255u) & ~255u;
     g_total_bytes = static_cast<UINT64>(g_row_pitch) * h;
-    g_upload = CreateLinearBuffer(g_total_bytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
+    if (FAILED(g_shared_input.create(g_device.Get(), w, h))) {
+        SetError("Failed to create shared D3D12 input texture"); return false;
+    }
     g_readback = CreateLinearBuffer(g_total_bytes, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST);
-    if (!g_upload || !g_readback) { SetError("Failed to create D3D12 upload/readback buffers"); return false; }
+    if (!g_readback) { SetError("Failed to create D3D12 readback buffer"); return false; }
 
     g_width = w; g_height = h;
 
@@ -1176,7 +1181,7 @@ __declspec(dllexport) int __cdecl dlss5nr_process(
     g_timings = {};
     g_last_error.clear();
     if (!g_initialized) { SetError("DLSS5 NR bridge is not initialized"); CopyError(err, err_cap); return 0; }
-    if (!input_device || !input_context || !input_texture || !bgra_in ||
+    if (!input_device || !input_context || !input_texture || (!g_channel_order_known && !bgra_in) ||
         !g_correction_target || width <= 0 || height <= 0) {
         SetError("Invalid D3D11 input, image buffer, dimensions, or correction target");
         CopyError(err, err_cap); return 0;
@@ -1224,18 +1229,15 @@ __declspec(dllexport) int __cdecl dlss5nr_process(
         g_timings.motion_vector_us = ElapsedUs(motion_start, TimingClock::now());
     }
 
-    const auto prepare_start = TimingClock::now();
-
-    SetCommonParams(style, preset, intensity, tone, structure, skin, automask, reset ? 1 : 0, use_motion_vectors);
-
-    void* mapped = nullptr;
-    HRESULT upload_result = g_upload->Map(0, nullptr, &mapped);
-    if (FAILED(upload_result) || !mapped) {
-        SetError("BGRA input upload Map failed: 0x%08X", static_cast<unsigned>(upload_result));
+    const auto input_start = TimingClock::now();
+    const HRESULT input_result = g_shared_input.copy_from(g_device.Get(), input_device, input_context, input_texture);
+    g_timings.input_us = ElapsedUs(input_start, TimingClock::now());
+    if (FAILED(input_result)) {
+        SetError("Shared GPU input copy failed: 0x%08X", static_cast<unsigned>(input_result));
         CopyError(err, err_cap); return 0;
     }
-    memcpy(mapped, bgra_in, static_cast<size_t>(width) * height * 4);
-    g_upload->Unmap(0, nullptr);
+    const auto prepare_start = TimingClock::now();
+    SetCommonParams(style, preset, intensity, tone, structure, skin, automask, reset ? 1 : 0, use_motion_vectors);
     if (!RecordInputConversion()) { CopyError(err, err_cap); return 0; }
 
     NGXResult er = g_shim_eval(reinterpret_cast<void*>(g_nr_eval), g_cmd.Get(), g_feature, g_params, nullptr);

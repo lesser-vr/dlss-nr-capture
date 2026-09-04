@@ -86,7 +86,31 @@ set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT d
 
 
 include(CTest)
+add_executable(dlss-nr-quality-compare src/quality_compare_main.cpp)
+target_include_directories(dlss-nr-quality-compare PRIVATE src)
+target_compile_options(dlss-nr-quality-compare PRIVATE /W4 /permissive- /EHsc /utf-8)
+add_executable(dlss-nr-benchmark src/benchmark_main.cpp src/frame_processor.cpp)
+target_include_directories(dlss-nr-benchmark PRIVATE src)
+target_compile_definitions(dlss-nr-benchmark PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(dlss-nr-benchmark PRIVATE /W4 /permissive- /EHsc /utf-8)
+target_link_libraries(dlss-nr-benchmark PRIVATE d3d11 dxgi mfplat mfreadwrite mfuuid ole32)
 if(BUILD_TESTING)
+    find_program(BENCHMARK_FFMPEG ffmpeg)
+    add_test(NAME regression.benchmark
+        COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
+            -File "${CMAKE_SOURCE_DIR}/tests/benchmark_smoke.ps1"
+            -BenchmarkPath "$<TARGET_FILE:dlss-nr-benchmark>"
+            -AdapterPath "$<TARGET_FILE:dlss-nr-adapter-sample>"
+            -ComparePath "$<TARGET_FILE:dlss-nr-quality-compare>"
+            -FfmpegPath "${BENCHMARK_FFMPEG}")
+    set_tests_properties(regression.benchmark PROPERTIES TIMEOUT 30)
+    add_executable(dlss-nr-gpu-input-test tests/gpu_input.cpp)
+    target_include_directories(dlss-nr-gpu-input-test PRIVATE src)
+    target_compile_definitions(dlss-nr-gpu-input-test PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_options(dlss-nr-gpu-input-test PRIVATE /W4 /permissive- /EHsc /utf-8)
+    target_link_libraries(dlss-nr-gpu-input-test PRIVATE d3d11 d3d12 dxgi)
+    add_test(NAME regression.gpu-input COMMAND dlss-nr-gpu-input-test)
+    set_tests_properties(regression.gpu-input PROPERTIES TIMEOUT 30)
     add_executable(dlss-nr-regression-core
         tests/regression_core.cpp
         src/frame_processor.cpp
@@ -116,6 +140,6 @@ if(BUILD_TESTING)
         COMMAND "${CMAKE_CTEST_COMMAND}" -C $<CONFIG> --output-on-failure
         DEPENDS dlss-nr-capture dlss-nr-worker dlss-nr-adapter-sample
                 dlss-nr-adapter-bridge dlss5nr-runtime-bridge dlss5nr-caller-shim
-                dlss-nr-regression-core
+                dlss-nr-regression-core dlss-nr-gpu-input-test dlss-nr-benchmark dlss-nr-quality-compare
         USES_TERMINAL)
 endif()

@@ -8,3 +8,5 @@
 *.txt text eol=lf
 *.manifest text eol=lf
 CMakeLists.txt text eol=lf
+
+"tests/gaming test sample vd.mp4" filter=lfs diff=lfs merge=lfs -text
