@@ -18,7 +18,10 @@ public:
     void resize(uint32_t width, uint32_t height);
     void render(const VideoFrame& frame);
     void clear();
-    void show_nr_toggle(bool enabled) noexcept;
+    void show_nr_toggle(bool enabled);
+    void show_notification(const std::wstring& message);
+    void set_performance_text(const std::wstring& text) { performance_text_ = text; }
+    uint64_t worker_average_processing_us() const noexcept { return speed_monitor_.average_us(); }
     void configure_shared_output(uint32_t width, uint32_t height,
                                  uint32_t fps_numerator, uint32_t fps_denominator);
     const std::wstring& shared_texture_name() const noexcept { return shared_texture_name_; }
@@ -32,10 +35,10 @@ public:
     uint64_t worker_fallback_frames() const noexcept { return worker_fallback_frames_; }
     bool worker_correction_active() const noexcept { return correction_active_; }
     bool worker_preparing() const noexcept {
-        return correction_enabled_ && !correction_timing_fast_ && !correction_slow_latched_;
+        return correction_enabled_ && speed_monitor_.preparing();
     }
     bool worker_correction_too_slow() const noexcept {
-        return correction_enabled_ && correction_available_ && correction_slow_latched_;
+        return correction_enabled_ && correction_available_ && speed_monitor_.slow();
     }
     void set_worker_wait_ms(uint32_t value) noexcept { worker_wait_ms_ = value; }
     void set_worker_correction_enabled(bool value) noexcept { correction_enabled_ = value; }
@@ -47,6 +50,7 @@ private:
     void initialize_correction_pipeline();
     void initialize_overlay_pipeline();
     void draw_status_overlay();
+    void draw_performance_overlay();
     void draw_status_banner(const std::wstring& message, OverlayMessageStyle style,
                             float opacity = 1.0f);
     void render_with_correction();
@@ -76,6 +80,8 @@ private:
     ComPtr<ID2D1SolidColorBrush> warning_text_brush_;
     ComPtr<IDWriteFactory> dwrite_factory_;
     ComPtr<IDWriteTextFormat> warning_text_format_;
+    ComPtr<IDWriteTextFormat> performance_text_format_;
+    std::wstring performance_text_;
     std::wstring shared_texture_name_;
     std::wstring worker_event_name_;
     HANDLE worker_event_{};
@@ -89,18 +95,12 @@ private:
     uint64_t worker_fallback_frames_{};
     uint64_t correction_updated_tick_ms_{};
     uint64_t worker_processing_time_us_{};
-    uint64_t correction_processing_ema_us_{};
-    NrSpeedPolicy speed_policy_{nr_speed_policy(60, 1)};
-    NrWarmupGate warmup_gate_{};
-    uint32_t correction_fast_updates_{};
-    uint32_t correction_slow_updates_{};
-    bool correction_timing_fast_{};
-    bool correction_slow_latched_{};
+    NrSpeedMonitor speed_monitor_{};
     uint32_t worker_wait_ms_{2};
     bool correction_enabled_{};
     bool correction_available_{};
     bool correction_active_{};
     uint64_t nr_notification_started_ms_{};
     bool nr_notification_visible_{};
-    bool nr_notification_enabled_{};
+    std::wstring notification_message_;
 };

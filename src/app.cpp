@@ -1,4 +1,8 @@
 #include "app.hpp"
+#include "diagnostics_report.hpp"
+#include <cstring>
+#include <iomanip>
+#include <sstream>
 
 #include <algorithm>
 #include <cmath>
@@ -22,6 +26,8 @@ constexpr UINT audio_command_base = 48100;
 constexpr UINT fullscreen_command = 49000;
 constexpr UINT always_on_top_command = 49001;
 constexpr UINT auto_size_command = 49002;
+constexpr UINT diagnostics_command = 49003;
+constexpr UINT performance_command = 49004;
 constexpr UINT passthrough_command = 50000;
 constexpr UINT motion_analysis_command = 50001;
 constexpr UINT history_overlay_command = 50002;
@@ -190,6 +196,7 @@ void App::load_settings()
     if (read_dword(L"NrWaitMs", value)) nr_wait_ms_ = value == 16 || value == 33 ? value : 2;
     if (read_dword(L"AlwaysOnTop", value)) always_on_top_ = value != 0;
     if (read_dword(L"AutoSizeToResolution", value)) auto_size_to_resolution_ = value != 0;
+    if (read_dword(L"PerformanceOverlay", value)) performance_overlay_ = value != 0;
     RegCloseKey(key);
 }
 
@@ -224,6 +231,7 @@ void App::save_settings()
     write_dword(L"NrWaitMs", nr_wait_ms_);
     write_dword(L"AlwaysOnTop", always_on_top_ ? 1u : 0u);
     write_dword(L"AutoSizeToResolution", auto_size_to_resolution_ ? 1u : 0u);
+    write_dword(L"PerformanceOverlay", performance_overlay_ ? 1u : 0u);
     RegCloseKey(key);
 }
 
@@ -276,6 +284,10 @@ void App::discover_capture_devices()
     AppendMenuW(view_menu_, MF_STRING, fullscreen_command, L"Full screen (F11)");
     AppendMenuW(view_menu_, MF_STRING | (always_on_top_ ? MF_CHECKED : 0), always_on_top_command, L"Always on top");
     AppendMenuW(view_menu_, MF_STRING | (auto_size_to_resolution_ ? MF_CHECKED : 0), auto_size_command, L"Size window to capture resolution");
+    AppendMenuW(view_menu_, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(view_menu_, MF_STRING, diagnostics_command, L"Copy diagnostics to clipboard");
+    AppendMenuW(view_menu_, MF_STRING | (performance_overlay_ ? MF_CHECKED : 0),
+                performance_command, L"Performance overlay");
     audio_menu_ = CreatePopupMenu();
     AppendMenuW(audio_menu_, MF_STRING | MF_CHECKED, audio_off_command, L"Off");
     for (size_t index = 0; index < audio_devices_.size(); ++index)
@@ -585,6 +597,8 @@ void App::start_capture_frame_rate(size_t index)
     received_frames_.store(0, std::memory_order_relaxed);
     dropped_frames_.store(0, std::memory_order_relaxed);
     displayed_frames_ = 0;
+    capture_rate_ = {}; present_rate_ = {}; worker_rate_ = {};
+    renderer_.set_performance_text(performance_overlay_ ? L"Measuring performance..." : L"");
     last_present_latency_ms_ = 0;
     processor_->reset_history();
     set_vertical_flip(modes_[index].format_name == L"RGB24");
@@ -715,6 +729,8 @@ void App::ensure_nr_worker_health()
 
 void App::stop_nr_worker()
 {
+    // Closing the last job handle also covers abrupt parent termination.
+    worker_job_.reset();
     if (worker_process_.hProcess) {
         TerminateProcess(worker_process_.hProcess, 0);
         WaitForSingleObject(worker_process_.hProcess, 1000);
@@ -752,15 +768,25 @@ void App::restart_nr_worker(uint32_t width, uint32_t height)
     const size_t separator = worker_path.find_last_of(L"\\/");
     worker_path.resize(separator == std::wstring::npos ? 0 : separator + 1);
     worker_path += L"dlss-nr-worker.exe";
-    std::wstring command = worker_path + L" " + std::to_wstring(GetCurrentProcessId()) +
+    std::wstring command = L"\"" + worker_path + L"\" " + std::to_wstring(GetCurrentProcessId()) +
         L" " + std::to_wstring(reinterpret_cast<uintptr_t>(renderer_.shared_input_handle())) +
         L" " + std::to_wstring(reinterpret_cast<uintptr_t>(renderer_.shared_output_handle())) +
         L" " + std::to_wstring(reinterpret_cast<uintptr_t>(temporal_mapping_)) +
         L" " + std::to_wstring(reinterpret_cast<uintptr_t>(renderer_.worker_event_handle()));
     STARTUPINFOW startup{sizeof(startup)};
-    if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr,
-                        &startup, &worker_process_))
-        throw std::runtime_error("Start GPU worker failed");
+    try {
+        worker_job_.create();
+        // Do not let the child run (or spawn descendants) before job assignment.
+        if (!CreateProcessW(worker_path.c_str(), command.data(), nullptr, nullptr, TRUE,
+                            CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &startup, &worker_process_))
+            throw std::runtime_error("Start GPU worker failed");
+        worker_job_.assign(worker_process_.hProcess);
+        if (ResumeThread(worker_process_.hThread) == static_cast<DWORD>(-1))
+            throw std::runtime_error("Resume GPU worker failed");
+    } catch (...) {
+        stop_nr_worker();
+        throw;
+    }
 }
 
 void App::apply_nr_settings(bool restart_worker)
@@ -848,6 +874,91 @@ void App::update_title()
     SetWindowTextW(window_, title.c_str());
 }
 
+void App::update_performance_overlay()
+{
+    const uint64_t now = GetTickCount64();
+    capture_rate_.observe(now, received_frames_.load());
+    worker_rate_.observe(now, renderer_.worker_output_frames());
+    if (!present_rate_.observe(now, displayed_frames_) || !performance_overlay_) return;
+    const wchar_t* state = !nr_enabled_ ? L"OFF" : renderer_.worker_correction_active() ? L"ACTIVE"
+        : renderer_.worker_correction_too_slow() ? L"TOO SLOW"
+        : renderer_.worker_preparing() ? L"PREPARING" : L"ORIGINAL";
+    std::wostringstream text;
+    text << std::fixed << std::setprecision(1)
+         << L"Capture " << capture_rate_.fps() << L" | Present " << present_rate_.fps() << L" FPS\n"
+         << L"Worker " << worker_rate_.fps() << L" FPS | NR " << state << L"\n"
+         << L"NR EMA " << renderer_.worker_average_processing_us() / 1000.0 << L" ms\n"
+         << L"App latency " << last_present_latency_ms_ << L" ms | Dropped " << dropped_frames_.load();
+    renderer_.set_performance_text(text.str());
+}
+
+void App::copy_diagnostics()
+{
+    DiagnosticsReport report;
+    report.add(L"Status", status_);
+    report.add(L"Device", active_device_ ? devices_[*active_device_].name : L"None");
+    report.add(L"Mode", active_mode_ ? modes_[*active_mode_].display_name() : L"None");
+    const auto policy = active_mode_
+        ? nr_speed_policy(modes_[*active_mode_].frame_rate_numerator,
+                          modes_[*active_mode_].frame_rate_denominator)
+        : nr_speed_policy(0, 0);
+    report.add(L"NR enabled", nr_enabled_ ? L"yes" : L"no");
+    report.add(L"Temporal enabled", nr_temporal_enabled_ ? L"yes" : L"no");
+    report.add(L"Style", nr_style_);
+    report.add(L"Preset", nr_preset_);
+    report.add(L"Intensity percent", nr_intensity_percent_);
+    report.add(L"Worker wait ms", nr_wait_ms_);
+    report.add(L"Received frames", received_frames_.load());
+    report.add(L"Displayed frames", displayed_frames_);
+    report.add(L"Measured capture FPS", std::to_wstring(capture_rate_.fps()));
+    report.add(L"Measured present FPS", std::to_wstring(present_rate_.fps()));
+    report.add(L"Measured worker output FPS", std::to_wstring(worker_rate_.fps()));
+    report.add(L"Dropped frames", dropped_frames_.load());
+    report.add(L"Present latency ms", last_present_latency_ms_);
+    report.add(L"Worker", nr_worker_status());
+    report.add(L"Processing EMA us", renderer_.worker_average_processing_us());
+    report.add(L"Enable threshold us", policy.enable_us);
+    report.add(L"Slow threshold us", policy.slow_us);
+    report.add(L"Required fast samples", policy.fast_samples);
+    report.add(L"Required slow samples", policy.slow_samples);
+    if (temporal_state_) {
+        const auto add = [&](const wchar_t* label, volatile LONG64* value) {
+            report.add(label, static_cast<uint64_t>(InterlockedCompareExchange64(value, 0, 0)));
+        };
+        add(L"Worker processed frames", &temporal_state_->worker_processed_frames);
+        add(L"NR total us", &temporal_state_->nr_total_us);
+        add(L"Input us", &temporal_state_->nr_input_us);
+        add(L"Setup us", &temporal_state_->nr_setup_us);
+        add(L"Optical flow us", &temporal_state_->nr_optical_flow_us);
+        add(L"Motion vectors us", &temporal_state_->nr_motion_vector_us);
+        add(L"GPU prepare us", &temporal_state_->nr_gpu_prepare_us);
+        add(L"GPU execute us", &temporal_state_->nr_gpu_execute_us);
+        add(L"Bridge output us", &temporal_state_->nr_bridge_output_us);
+        add(L"Correction output us", &temporal_state_->nr_correction_output_us);
+    }
+    const auto& text = report.text();
+    const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (!memory) { show_error(L"Cannot allocate diagnostics clipboard data."); return; }
+    void* buffer = GlobalLock(memory);
+    if (!buffer) { GlobalFree(memory); show_error(L"Cannot lock diagnostics clipboard data."); return; }
+    std::memcpy(buffer, text.c_str(), bytes);
+    GlobalUnlock(memory);
+    if (!OpenClipboard(window_)) {
+        GlobalFree(memory);
+        show_error(L"Cannot open clipboard. Please try again.");
+        return;
+    }
+    const bool copied = EmptyClipboard() && SetClipboardData(CF_UNICODETEXT, memory);
+    CloseClipboard();
+    if (!copied) {
+        GlobalFree(memory);
+        show_error(L"Cannot copy diagnostics to clipboard.");
+        return;
+    }
+    renderer_.show_notification(L"DIAGNOSTICS COPIED");
+}
+
 void App::show_error(const std::wstring& message)
 {
     status_ = message;
@@ -902,6 +1013,7 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             last_present_latency_ms_ = frame->arrival_tick_ms && now >= frame->arrival_tick_ms
                 ? now - frame->arrival_tick_ms : 0;
             ++displayed_frames_;
+            update_performance_overlay();
             if (displayed_frames_ % 15 == 0) update_title();
             if (displayed_frames_ % 60 == 0) ensure_nr_worker_health();
         }
@@ -956,6 +1068,14 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         if (command == fullscreen_command) { toggle_fullscreen(); return 0; }
         if (command == always_on_top_command) { set_always_on_top(!always_on_top_); return 0; }
         if (command == auto_size_command) { set_auto_size_to_resolution(!auto_size_to_resolution_); return 0; }
+        if (command == diagnostics_command) { copy_diagnostics(); return 0; }
+        if (command == performance_command) {
+            performance_overlay_ = !performance_overlay_;
+            CheckMenuItem(view_menu_, performance_command, MF_BYCOMMAND | (performance_overlay_ ? MF_CHECKED : MF_UNCHECKED));
+            renderer_.set_performance_text(performance_overlay_ ? L"Measuring performance..." : L"");
+            save_settings();
+            return 0;
+        }
         if (command == audio_off_command) { start_audio_capture(audio_devices_.size()); return 0; }
         if (command >= audio_command_base && command < audio_command_base + audio_devices_.size()) {
             start_audio_capture(command - audio_command_base); return 0;

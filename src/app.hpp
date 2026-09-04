@@ -4,6 +4,8 @@
 #include "audio_capture.hpp"
 #include "d3d11_renderer.hpp"
 #include "frame_processor.hpp"
+#include "frame_rate_meter.hpp"
+#include "worker_job.hpp"
 
 #include <atomic>
 #include <memory>
@@ -46,6 +48,8 @@ private:
     void ensure_nr_worker_health();
     void enqueue_frame(VideoFrame&& frame);
     void update_title();
+    void copy_diagnostics();
+    void update_performance_overlay();
     void show_error(const std::wstring& message);
 
     HWND window_{};
@@ -91,6 +95,8 @@ private:
     bool fullscreen_{};
     bool always_on_top_{};
     bool auto_size_to_resolution_{};
+    bool performance_overlay_{};
+    FrameRateMeter capture_rate_, present_rate_, worker_rate_;
     WINDOWPLACEMENT windowed_placement_{sizeof(WINDOWPLACEMENT)};
     std::wstring saved_device_name_;
     std::wstring saved_format_;
@@ -111,6 +117,7 @@ private:
     uint32_t nr_intensity_percent_{100};
     uint32_t nr_wait_ms_{2};
     PROCESS_INFORMATION worker_process_{};
+    WorkerJob worker_job_;
     HANDLE temporal_mapping_{};
     WorkerTemporalState* temporal_state_{};
     uint64_t last_worker_restart_ms_{};

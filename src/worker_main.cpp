@@ -1,4 +1,5 @@
 #include "nr_adapter_api.hpp"
+#include "worker_output_policy.hpp"
 #include "worker_protocol.hpp"
 #include <windows.h>
 #include <d3d11_1.h>
@@ -190,7 +191,7 @@ int wmain(int argc, wchar_t** argv)
             payload.nr_intensity_percent = static_cast<uint16_t>(InterlockedCompareExchange(&temporal->nr_intensity_percent, 0, 0));
             payload.nr_temporal = InterlockedCompareExchange(&temporal->nr_temporal, 0, 0) != 0;
             payload.nr_automask = 1;
-            if ((payload.flags & temporal_valid) != 0 && payload.frame_sequence >= last_sequence) {
+            if (worker_frame_eligible(payload, last_sequence)) {
                 if (adapter->process(context.Get(), output_texture.Get(), payload)) {
                     consecutive_failures = 0;
                     last_sequence = payload.frame_sequence;
@@ -220,7 +221,7 @@ int wmain(int argc, wchar_t** argv)
             }
             // Key 1 publishes a completed result. Skipped/failed input must
             // return key 0 to the producer, not masquerade as new NR output.
-            output_mutex->ReleaseSync(output_completed ? 1 : 0);
+            output_mutex->ReleaseSync(worker_output_release_key(output_completed));
         }
     }
     InterlockedExchange(&temporal->worker_adapter_state, 0);

@@ -1,9 +1,13 @@
 #include "frame_processor.hpp"
+#include "diagnostics_report.hpp"
+#include "frame_rate_meter.hpp"
+#include "worker_job.hpp"
 #include "nr_adapter_api.hpp"
 #include "nr_notification.hpp"
 #include "nr_temporal_policy.hpp"
 #include "nr_speed_policy.hpp"
 #include "overlay_style.hpp"
+#include "worker_output_policy.hpp"
 #include <windows.h>
 #include <iostream>
 #include <string>
@@ -22,6 +26,113 @@ VideoFrame solid(uint32_t width, uint32_t height, uint8_t value, uint64_t sequen
 }
 
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring(argv[1]) == L"--job-probe") {
+        Sleep(30000); // Bounded fallback if the lifetime guard fails.
+        return 0;
+    }
+    {
+        WorkerJob job;
+        job.create();
+        DWORD flags{};
+        check(GetHandleInformation(job.get(), &flags) && !(flags & HANDLE_FLAG_INHERIT),
+              "worker job handle cannot be inherited by child");
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+        check(QueryInformationJobObject(job.get(), JobObjectExtendedLimitInformation,
+              &limits, sizeof(limits), nullptr) &&
+              (limits.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE),
+              "worker job kills children on last handle close");
+        wchar_t executable[32768]{};
+        GetModuleFileNameW(nullptr, executable, 32768);
+        std::wstring command = L"\"" + std::wstring(executable) + L"\" --job-probe";
+        STARTUPINFOW startup{sizeof(startup)};
+        PROCESS_INFORMATION child{};
+        const bool created = CreateProcessW(executable, command.data(), nullptr, nullptr, FALSE,
+            CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &startup, &child) != FALSE;
+        check(created, "create lifetime test child suspended");
+        if (created) {
+            try {
+                job.assign(child.hProcess);
+                BOOL assigned{};
+                check(IsProcessInJob(child.hProcess, job.get(), &assigned) && assigned,
+                      "child is assigned before execution");
+                check(ResumeThread(child.hThread) != static_cast<DWORD>(-1), "resume lifetime test child");
+                job.reset();
+                check(WaitForSingleObject(child.hProcess, 5000) == WAIT_OBJECT_0,
+                      "closing worker job terminates live child");
+            } catch (...) { check(false, "worker job lifecycle threw"); }
+            // Failure cleanup is restricted to the child created by this test.
+            TerminateProcess(child.hProcess, 0);
+            WaitForSingleObject(child.hProcess, 5000);
+            CloseHandle(child.hThread);
+            CloseHandle(child.hProcess);
+        }
+    }
+    FrameRateMeter rate;
+    check(!rate.observe(0, 0), "FPS first sample seeds baseline");
+    check(!rate.observe(999, 59), "FPS waits for one second");
+    check(rate.observe(1000, 60) && rate.fps() == 60.0, "FPS measures counter delta");
+    check(rate.observe(3000, 120) && rate.fps() == 30.0, "FPS uses actual elapsed time");
+    check(rate.observe(4000, 120) && rate.fps() == 0.0, "FPS zero progress is zero");
+    check(!rate.observe(4100, 0) && rate.fps() == 0.0, "FPS counter restart resets baseline");
+    check(rate.observe(5100, 30) && rate.fps() == 30.0, "FPS recovers after restart");
+    check(!rate.observe(100, 31) && rate.fps() == 0.0, "FPS clock reversal resets baseline");
+    DiagnosticsReport report;
+    report.add(L"Device", L"캡쳐 장치");
+    report.add(L"NR total us", uint64_t{1234567890123});
+    report.add(L"Worker", std::wstring(2048, L'x'));
+    check(report.text().find(L"Device: 캡쳐 장치\r\n") != std::wstring::npos,
+          "diagnostics preserves Unicode and Windows newlines");
+    check(report.text().find(L"NR total us: 1234567890123\r\n") != std::wstring::npos,
+          "diagnostics preserves full precision counters");
+    check(report.text().find(std::wstring(2048, L'x')) != std::wstring::npos,
+          "diagnostics does not truncate worker status");
+    for (const uint32_t fps : {30u, 60u, 120u}) {
+        NrSpeedMonitor monitor;
+        monitor.reset(fps, 1);
+        const auto limits = nr_speed_policy(fps, 1);
+        const uint64_t quick = limits.enable_us / 2;
+        uint64_t clock_ms = 2100;
+        monitor.observe(100, 5000000);
+        monitor.observe(2099, 5000000);
+        check(monitor.preparing() && monitor.average_us() == 0,
+              "startup cost never enters speed average");
+        for (uint32_t i = 1; i < limits.fast_samples; ++i)
+            monitor.observe(clock_ms++, quick);
+        check(monitor.preparing(), "activation waits for qualifying result count");
+        monitor.observe(clock_ms++, quick);
+        check(monitor.fast() && !monitor.slow(), "stable output activates NR");
+        monitor.observe(clock_ms++, limits.slow_us * 3);
+        check(monitor.fast() && !monitor.slow(), "isolated latency spike cannot disable NR");
+        for (uint32_t i = 0; i < limits.slow_samples * 2 + 100; ++i)
+            monitor.observe(clock_ms++, limits.slow_us * 2);
+        check(monitor.slow() && !monitor.fast(), "sustained slowness still raises warning");
+        for (uint32_t i = 0; i < limits.fast_samples * 2 + 100; ++i)
+            monitor.observe(clock_ms++, quick);
+        check(monitor.fast() && !monitor.slow(), "fast recovery clears slow warning");
+        monitor.reset(fps == 30 ? 60 : 30, 1);
+        check(monitor.preparing() && monitor.average_us() == 0,
+              "FPS change clears prior speed state");
+        monitor.observe(clock_ms++, 0);
+        check(monitor.average_us() == 0 && monitor.preparing(),
+              "missing timing cannot qualify output");
+        monitor.observe(clock_ms++, 5000000);
+        check(monitor.average_us() == 0, "restarted worker receives a new warmup");
+    }
+    NrSpeedMonitor cold_slow;
+    cold_slow.reset(30, 1);
+    cold_slow.observe(0, 100000);
+    for (uint64_t i = 0; i < 30; ++i) cold_slow.observe(2000 + i, 100000);
+    check(cold_slow.slow() && !cold_slow.preparing(),
+          "genuinely slow startup eventually exits preparing with warning");
+    TemporalAnalysisPayload input{};
+    input.frame_sequence = 100;
+    check(!worker_frame_eligible(input, 0), "invalid analysis cannot be processed");
+    input.flags = temporal_valid;
+    check(!worker_frame_eligible(input, 101), "older sequence is skipped");
+    check(worker_frame_eligible(input, 100), "equal sequence preserves existing worker behavior");
+    check(worker_frame_eligible(input, 99), "new sequence can be processed");
+    check(worker_output_release_key(false) == 0, "skipped or failed processing does not publish output");
+    check(worker_output_release_key(true) == 1, "successful processing publishes output");
     const auto info_style = overlay_palette(OverlayMessageStyle::information);
     const auto error_style = overlay_palette(OverlayMessageStyle::error);
     check(info_style.background_rgb == 0 && info_style.text_rgb == 0xFFFF00 &&
@@ -117,6 +228,16 @@ int wmain(int argc, wchar_t** argv) {
               (motion->temporal_state().flags & temporal_valid) != 0,
               "new session becomes valid without catching up to old sequence");
     }
+
+    auto resized = solid(80, 60, 100, 0);
+    motion->process(resized);
+    check(motion->temporal_state().frame_sequence == 0 &&
+          !worker_frame_eligible(motion->temporal_state(), 0),
+          "resolution warmup cannot expose previous analysis");
+    resized.sequence = 1;
+    motion->process(resized);
+    check(worker_frame_eligible(motion->temporal_state(), 0),
+          "resized input becomes processable after warmup");
 
     if (argc >= 2) {
         HMODULE module = LoadLibraryExW(argv[1], nullptr,
