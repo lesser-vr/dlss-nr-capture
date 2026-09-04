@@ -3,6 +3,7 @@
 #include "audio_health.hpp"
 #include "device_refresh.hpp"
 #include "event_log.hpp"
+#include "quality_capture.hpp"
 #include <filesystem>
 #include "diagnostics_report.hpp"
 #include "frame_rate_meter.hpp"
@@ -36,6 +37,11 @@ VideoFrame solid(uint32_t width, uint32_t height, uint8_t value, uint64_t sequen
 
 int wmain(int argc, wchar_t** argv) {
     check_audio_output(check);
+    {
+        const uint8_t pixels[] = {1,2,3,255, 4,5,6,255, 7,8,9,255, 10,11,12,255};
+        const auto roi = quality_proxy(pixels, 2, 2, 8, 1, 1, 1, 1, 1, 1);
+        check(roi == std::vector<uint8_t>({12,11,10}), "quality ROI uses exact source location and RGB order");
+    }
     {
         wchar_t temp[MAX_PATH]{}; GetTempPathW(MAX_PATH, temp);
         const auto folder = std::filesystem::path(temp) / (L"dlss-log-test-" + std::to_wstring(GetCurrentProcessId()));

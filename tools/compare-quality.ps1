@@ -12,6 +12,17 @@ $OutputDir = [IO.Path]::GetFullPath($OutputDir)
 if (Test-Path -LiteralPath $OutputDir) { throw 'Use a new comparison directory' }
 $a = Get-Content -LiteralPath (Join-Path $Baseline 'summary.json') -Raw | ConvertFrom-Json
 $b = Get-Content -LiteralPath (Join-Path $Candidate 'summary.json') -Raw | ConvertFrom-Json
+foreach ($summary in @($a,$b)) {
+ foreach ($field in @('quality_region_x','quality_region_y','quality_region_width','quality_region_height')) {
+  if ($null -eq $summary.$field) {
+   $default = if ($field -eq 'quality_region_width') { $summary.width } elseif ($field -eq 'quality_region_height') { $summary.height } else { 0 }
+   $summary | Add-Member -NotePropertyName $field -NotePropertyValue $default -Force
+  }
+ }
+}
+foreach ($field in @('quality_region_x','quality_region_y','quality_region_width','quality_region_height')) {
+ if ($a.$field -ne $b.$field) { throw "Different quality regions: $field" }
+}
 if ($a.proxy_format -ne 'rgb24-nearest-v1') { throw 'Unsupported proxy format' }
 foreach ($s in @($a,$b)) {
   if ($s.status -ne 'complete' -or -not $s.capture_output) { throw 'Both runs must be complete with -CaptureOutput' }
@@ -50,7 +61,7 @@ if (-not $NoVideo -and $ffmpeg) {
   foreach ($file in @((Join-Path $Baseline 'input.rgb'),(Join-Path $Baseline 'output.rgb'),(Join-Path $Candidate 'output.rgb'))) {
     $videoArgs += @('-f','rawvideo','-pixel_format','rgb24','-video_size',$size,'-framerate',$rate,'-i',$file)
   }
-  $videoArgs += @('-filter_complex','[0:v][1:v][2:v]hstack=inputs=3','-c:v','libx264','-crf','18','-pix_fmt','yuv420p','-movflags','+faststart',(Join-Path $OutputDir 'comparison.mp4'))
+  $videoArgs += @('-filter_complex','[0:v][1:v][2:v]hstack=inputs=3,pad=ceil(iw/2)*2:ceil(ih/2)*2','-c:v','libx264','-crf','18','-pix_fmt','yuv420p','-movflags','+faststart',(Join-Path $OutputDir 'comparison.mp4'))
   & $ffmpeg.Source @videoArgs
   if ($LASTEXITCODE -ne 0) { throw 'Comparison video encoding failed; numeric report is available' }
   $video = '<video controls width="960" src="comparison.mp4"></video>'
@@ -61,7 +72,7 @@ $html = @"
 <h1>NR output comparison</h1>
 <p>Video columns: source / baseline / candidate. Preview starts after warmup; table times refer to the original source.</p>
 $video
-<p>320x180 point-sampled RGB proxies. Scores use RGB levels 0-255. No motion compensation; flags are review hints, NOT flicker/ghosting verdicts. MP4 is a lossy preview; metrics use raw proxies.</p>
+<p>$($a.proxy_width)x$($a.proxy_height) RGB samples from source region ($($a.quality_region_x), $($a.quality_region_y), $($a.quality_region_width), $($a.quality_region_height)). Scores use RGB levels 0-255. No motion compensation; flags are review hints, NOT flicker/ghosting verdicts. MP4 is a lossy preview; metrics use raw samples.</p>
 <p>Review rules: frame MAE &gt; 5, temporal residual increase &gt; 3, or nearly static input (change &lt; 1) with candidate residual change &gt; 3. No automatic quality pass/fail.</p>
 <h2>Largest changes (up to 20 frames, including unflagged frames)</h2>
 <table><tr><th>Source frame</th><th>Source seconds</th><th>Output MAE</th><th>Residual increase</th><th>Review flag</th></tr>$($table -join "`n")</table>

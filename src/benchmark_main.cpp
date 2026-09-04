@@ -56,11 +56,14 @@ int wmain(int argc, wchar_t** argv) {
                 std::cout << "--input VIDEO (or --synthetic) --output NEW_DIRECTORY [--adapter DLL]\n"
                     "[--frames 300] [--warmup 120] [--style 1] [--preset 3] [--intensity 100] [--temporal 1] [--warp] [--capture-output]\n"
                     "Offline sequential benchmark; no capture/presentation, no real-time drop or fallback measurement.\n";
+                std::cout << "--full-resolution or --quality-width/--quality-height; optional --quality-x/--quality-y/--quality-region-width/--quality-region-height\n";
                 return 0;
             }
-            if (key == L"--synthetic" || key == L"--warp" || key == L"--capture-output") args[key] = L"1";
+            if (key == L"--synthetic" || key == L"--warp" || key == L"--capture-output" || key == L"--full-resolution") args[key] = L"1";
             else if (key == L"--input" || key == L"--output" || key == L"--adapter" || key == L"--frames" ||
-                     key == L"--warmup" || key == L"--style" || key == L"--preset" || key == L"--intensity" || key == L"--temporal") {
+                     key == L"--warmup" || key == L"--style" || key == L"--preset" || key == L"--intensity" || key == L"--temporal" ||
+                     key == L"--quality-width" || key == L"--quality-height" || key == L"--quality-x" || key == L"--quality-y" ||
+                     key == L"--quality-region-width" || key == L"--quality-region-height") {
                 if (++i == argc) throw std::runtime_error("Missing option value");
                 args[key] = argv[i];
             } else throw std::runtime_error("Unknown option (see --help)");
@@ -121,6 +124,18 @@ int wmain(int argc, wchar_t** argv) {
         ComPtr<ID3D11Device> device; ComPtr<ID3D11DeviceContext> context;
         throw_if_failed(D3D11CreateDevice(gpu.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
             nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context), "D3D11 device");
+        const UINT qx = number(L"--quality-x", 0, 0, width - 1), qy = number(L"--quality-y", 0, 0, height - 1);
+        const UINT rw = number(L"--quality-region-width", width - qx, 1, width - qx);
+        const UINT rh = number(L"--quality-region-height", height - qy, 1, height - qy);
+        const UINT qw = args.count(L"--full-resolution") ? rw : number(L"--quality-width", quality_width, 1, 8192);
+        const UINT qh = args.count(L"--full-resolution") ? rh : number(L"--quality-height", quality_height, 1, 8192);
+        if (args.count(L"--capture-output")) {
+            auto ancestor = output.parent_path();
+            while (!fs::exists(ancestor) && ancestor != ancestor.parent_path()) ancestor = ancestor.parent_path();
+            const uint64_t required = static_cast<uint64_t>(qw) * qh * 6 * frames;
+            if (required + 16 * 1024 * 1024 > fs::space(ancestor).available)
+                throw std::runtime_error("Insufficient disk space for requested quality capture");
+        }
         D3D11_TEXTURE2D_DESC desc{}; desc.Width = width; desc.Height = height;
         desc.MipLevels = 1; desc.ArraySize = 1; desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
         desc.SampleDesc.Count = 1; desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
@@ -140,7 +155,7 @@ int wmain(int argc, wchar_t** argv) {
         QualityCapture quality;
         std::ofstream inputs, outputs;
         if (capture_output) {
-            quality.initialize(device.Get(), desc);
+            quality.initialize(device.Get(), desc, qw, qh, qx, qy, rw, rh);
             inputs.open(output / L"input.rgb", std::ios::binary);
             outputs.open(output / L"output.rgb", std::ios::binary);
             inputs.exceptions(std::ios::badbit | std::ios::failbit);
@@ -243,7 +258,9 @@ int wmain(int argc, wchar_t** argv) {
             << ",\n  \"over_source_frame_budget\": " << over_budget
             << ",\n  \"capture_output\": " << (capture_output ? "true" : "false")
             << ", \"performance_comparable\": " << (capture_output ? "false" : "true")
-            << ",\n  \"proxy_format\": \"rgb24-nearest-v1\", \"proxy_width\": " << quality_width << ", \"proxy_height\": " << quality_height
+            << ",\n  \"proxy_format\": \"rgb24-nearest-v1\", \"proxy_width\": " << qw << ", \"proxy_height\": " << qh
+            << ",\n  \"quality_region_x\": " << qx << ", \"quality_region_y\": " << qy
+            << ", \"quality_region_width\": " << rw << ", \"quality_region_height\": " << rh
             << ",\n  \"live_drop_rate\": null, \"live_fallback_rate\": null, \"quality_score\": null,\n  \"error\": " << json(error) << "\n}\n";
         report.close();
         reader.Reset();

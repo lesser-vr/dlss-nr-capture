@@ -29,6 +29,26 @@ $original = Get-Content -LiteralPath (Join-Path $output 'summary.json') -Raw
 if ($LASTEXITCODE -eq 0) { throw 'Benchmark overwrote an existing report directory' }
 if ((Get-Content -LiteralPath (Join-Path $output 'summary.json') -Raw) -ne $original) { throw 'Existing report changed' }
 Write-Host 'benchmark report and overwrite protection checks passed'
+ $full = Join-Path $output 'full-resolution'
+ & $BenchmarkPath --synthetic --warp --adapter $AdapterPath --output $full --warmup 0 --frames 1 --capture-output --full-resolution
+ if ($LASTEXITCODE -ne 0) { throw 'Full-resolution quality capture failed' }
+ if ((Get-Item -LiteralPath "$full\output.rgb").Length -ne 1280*720*3) { throw 'Full-resolution output size incorrect' }
+ $region = Join-Path $output 'region'
+ & $BenchmarkPath --synthetic --warp --adapter $AdapterPath --output $region --warmup 0 --frames 2 --capture-output --full-resolution --quality-x 5 --quality-y 7 --quality-region-width 17 --quality-region-height 9
+ if ($LASTEXITCODE -ne 0) { throw 'ROI quality capture failed' }
+ $r = Get-Content -LiteralPath "$region\summary.json" -Raw | ConvertFrom-Json
+ if ($r.proxy_width -ne 17 -or $r.proxy_height -ne 9 -or $r.quality_region_x -ne 5 -or $r.quality_region_y -ne 7) { throw 'ROI metadata incorrect' }
+ if ((Get-Item -LiteralPath "$region\output.rgb").Length -ne 2*17*9*3) { throw 'ROI output size incorrect' }
+ foreach ($dir in @($full,$region)) {
+  '{"timed_out":false,"sha256":{}}' | Set-Content -LiteralPath "$dir\manifest.json"
+ }
+ & "$PSScriptRoot\..\tools\compare-quality.ps1" -Baseline $region -Candidate $region -OutputDir "$region\comparison" -ReleaseDir (Split-Path $ComparePath) -NoVideo
+ $r.quality_region_x = 6
+ $r | ConvertTo-Json | Set-Content -LiteralPath "$region\summary.json"
+ $rejected = $false
+ try { & "$PSScriptRoot\..\tools\compare-quality.ps1" -Baseline $full -Candidate $region -OutputDir "$region\invalid" -ReleaseDir (Split-Path $ComparePath) -NoVideo } catch { $rejected = $true }
+ if (-not $rejected) { throw 'Mismatched ROI was accepted' }
+ Write-Host 'full-resolution capture and ROI identity/metadata checks passed'
 $gamingFixture = Join-Path $PSScriptRoot 'gaming test sample vd.mp4'
 if (Test-Path -LiteralPath $gamingFixture) {
   & $BenchmarkPath --input $gamingFixture --warp --adapter $AdapterPath --output (Join-Path $output 'gaming-decoder') --warmup 0 --frames 2

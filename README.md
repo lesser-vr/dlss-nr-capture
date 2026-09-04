@@ -125,12 +125,12 @@ NR OFF/ON 앱 상태와 무관한 별도 실행이며 앱 사용자 설정을 �
 일부 temporal NR 실행은 측정 완료 후 어댑터 정리에서 멈출 수 있습니다. 스크립트는
 유효한 보고서 저장 후 5초 동안 종료되지 않으면 **해당 벤치마크 프로세스만** 종료하며
 `forced_cleanup_after_report`를 기록합니다. 전체 시간 초과는 성공으로 처리하지 않습니다.
-전체 해상도 출력 저장과 자동 화질 합격/불합격 판정은 후속 작업입니다.
+전체 해상도/관심 영역 저장은 아래 옵션으로 지원합니다. 자동 화질 합격/불합격 판정은 하지 않습니다.
 
 ### 화질 회귀 검토용 출력 비교
 
-같은 영상으로 기준/후보 출력을 생성한 뒤 비교합니다. 현재 단계에서는 **320×180 RGB
-축소 프레임**을 매 프레임 저장합니다. `-CaptureOutput` 사용 시 GPU readback/디스크 출력이
+같은 영상으로 기준/후보 출력을 생성한 뒤 비교합니다. 기본값은 **320×180 RGB
+축소 프레임**이며 전체 해상도나 관심 영역도 선택할 수 있습니다. `-CaptureOutput` 사용 시 GPU readback/디스크 출력이
 추가되므로 성능 비교용 실행과 분리해야 합니다(`performance_comparable: false`).
 
 ```powershell
@@ -156,6 +156,30 @@ NR OFF/ON 앱 상태와 무관한 별도 실행이며 앱 사용자 설정을 �
   `quality_pass`는 미판정(null)입니다. 처음에는 같은 빌드 반복 결과로 변동 폭부터 확인하세요.
 
 원본 게임 영상 `tests/gaming test sample vd.mp4`는 Git LFS로 관리합니다.
+
+고해상도/관심 영역 저장 예:
+
+```powershell
+# 전체 영상의 원래 픽셀 크기. 저장량은 프레임 수 × 너비 × 높이 × 6바이트(입력+출력).
+.\tools\benchmark.ps1 -InputVideo '.\tests\gaming test sample vd.mp4' -CaptureOutput -FullResolution -Frames 60
+# (640,360)에서 640×360 영역을 원래 픽셀 크기로 저장
+.\tools\benchmark.ps1 -InputVideo '.\tests\gaming test sample vd.mp4' -CaptureOutput -FullResolution -RegionX 640 -RegionY 360 -RegionWidth 640 -RegionHeight 360 -Frames 60
+# 별도 출력 크기는 -QualityWidth / -QualityHeight로 지정
+```
+
+영역은 원본 SDR 프레임 좌표입니다. 기본 NR 처리는 전체 영상에 적용하고 저장할 때만 잘라냅니다.
+영역/출력 크기가 다른 실행은 비교에서 거부합니다. 공간 여유를 사전 검사하지만 다른 프로그램의
+디스크 사용까지 보장하지는 않습니다. 자동 화질 판정은 없고 기존 검토 지표를 그대로 사용합니다.
+
+성능 비교는 화질 파일을 저장하지 않은 동일 조건 실행끼리 수행합니다.
+
+```powershell
+.\tools\compare-performance.ps1 -Baseline '.\build\baseline' -Candidate '.\build\candidate' -OutputDir '.\build\perf-comparison' -ThresholdPercent 10
+```
+
+평균/p95/p99 NR 처리시간 중 하나라도 기준보다 임계값을 초과해 느려지면 보고서를 남기고 실패합니다.
+보고만 받으려면 `-AllowRegression`을 지정합니다. 기본값 10%는 초기 운영 기준이며 반복 측정으로
+환경 잡음을 확인하세요. 실제 게임 FPS나 화질 판정을 대신하지 않습니다.
 생성 결과와 독점 NR DLL은 Git/LFS에 포함하지 않으며, 게임 영상은 실행 파일 배포 패키지에도 넣지 않습니다.
 
 Git LFS가 설치된 환경에서 저장소를 복제하면 영상 본체도 내려받습니다. 이미 복제했거나

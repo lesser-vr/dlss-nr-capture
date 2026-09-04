@@ -2,6 +2,13 @@ param(
   [string]$InputVideo,
   [switch]$Synthetic,
   [switch]$CaptureOutput,
+  [switch]$FullResolution,
+  [ValidateRange(1,8192)][int]$QualityWidth = 320,
+  [ValidateRange(1,8192)][int]$QualityHeight = 180,
+  [ValidateRange(0,8191)][int]$RegionX = 0,
+  [ValidateRange(0,8191)][int]$RegionY = 0,
+  [ValidateRange(0,8192)][int]$RegionWidth = 0,
+  [ValidateRange(0,8192)][int]$RegionHeight = 0,
   [string]$ReleaseDir = "$PSScriptRoot\..\build\Release",
   [string]$OutputDir,
   [ValidateRange(1,1000000)][int]$Frames = 300,
@@ -27,6 +34,14 @@ $OutputDir = [IO.Path]::GetFullPath($OutputDir).TrimEnd('\')
 $arguments = @('--output', $OutputDir, '--warmup', $Warmup, '--frames', $Frames,
     '--style', $Style, '--preset', $Preset, '--intensity', $Intensity, '--temporal', $Temporal)
 if ($CaptureOutput) { $arguments += '--capture-output' }
+if (-not $CaptureOutput -and ($FullResolution -or $QualityWidth -ne 320 -or $QualityHeight -ne 180 -or
+    $RegionX -or $RegionY -or $RegionWidth -or $RegionHeight)) { throw 'Quality options require -CaptureOutput' }
+if ($CaptureOutput) {
+ $arguments += @('--quality-width',$QualityWidth,'--quality-height',$QualityHeight,'--quality-x',$RegionX,'--quality-y',$RegionY)
+ if ($RegionWidth) { $arguments += @('--quality-region-width',$RegionWidth) }
+ if ($RegionHeight) { $arguments += @('--quality-region-height',$RegionHeight) }
+ if ($FullResolution) { $arguments += '--full-resolution' }
+}
 $files = @('dlss-nr-benchmark.exe','dlss-nr-adapter-bridge.dll','nr-runtime\dlss5nr_bridge.dll',
     'nr-runtime\caller\nvngx.dll_comfy.dll','nr-runtime\nvngx_dlssnr.dll')
 $hashes = [ordered]@{}
