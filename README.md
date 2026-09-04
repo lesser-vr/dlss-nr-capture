@@ -23,8 +23,14 @@ Windows용 저지연 캡처·Neural Rendering 실험 애플리케이션입니다
 - NR 초기화·처리 실패 시 브리지의 상세 오류를 표시하고 안전하게 패스스루로 전환
 - 창 제목에 프레임 도착→표시 지연과 latest-frame 교체 드롭 수 실시간 표시
 - NR 입력·출력 공유 텍스처 분리 및 보정값 합성: 느린 NR 결과의 디테일 보정을 최신 원본에 적용해 정지·깜빡임 방지
-- NR 보정이 25ms 이하 간격으로 5회 연속 갱신되고 40ms 이내로 유지될 때만 화면에 적용하며, 느리면 자동으로 안정적인 원본 화면으로 복귀
+- NR 처리시간이 15회 연속 15ms 이하일 때 보정을 적용하고, 5회 연속 20ms 이상이면 원본으로 복귀하는 히스테리시스로 스케줄링 지터와 깜빡임 방지
 - NR이 너무 느려 원본으로 복귀한 동안에는 창·전체 화면 영상 위에 경고 오버레이 표시
+- NR 프레임의 입력, Optical Flow, GPU 준비·실행, 출력 단계별 시간을 창 제목에 표시
+- NVOF 축소 Flow를 D3D12 compute shader로 전체 해상도 모션 벡터에 확장해 CPU 병목 제거
+- DLSS readback에서 채널 감지, 잔차 계산, 히스토리 마스크 및 BGRA8 인코딩을 한 번에 처리해 중간 float 출력 제거
+- D3D12가 공유 BGRA8 보정 render target을 생성하고 D3D11 worker가 GPU 복사해 정상 프레임의 CPU readback·재업로드 제거
+- BGRA8 입력을 작은 upload buffer로 전달하고 D3D12 compute shader에서 RGBA16F DLSS 입력으로 변환
+- NVOF는 worker의 D3D11 BGRA 텍스처를 GPU에서 직접 복사해 CPU RGB·luma 변환과 재업로드 제거
 
 기본 처리 백엔드는 `Passthrough`이며, 사용자가 별도 제공한 호환 런타임이 있을 때만
 선택적으로 DLSS Neural Rendering 브리지를 활성화합니다. GPU 작업 프로세스, 공유 텍스처,

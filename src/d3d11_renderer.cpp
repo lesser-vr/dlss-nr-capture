@@ -56,7 +56,9 @@ void D3D11Renderer::configure_shared_output(uint32_t width, uint32_t height)
     shared_width_ = width; shared_height_ = height;
     worker_output_frames_ = worker_enhanced_frames_ = worker_fallback_frames_ = 0;
     correction_updated_tick_ms_ = 0;
-    correction_stable_updates_ = 0;
+    worker_processing_time_us_ = 0;
+    correction_fast_updates_ = correction_slow_updates_ = 0;
+    correction_timing_fast_ = false;
     correction_available_ = correction_active_ = false;
 }
 
@@ -299,11 +301,15 @@ void D3D11Renderer::render(const VideoFrame& frame)
         if (correction_enabled_) {
             context_->CopyResource(correction_texture_.Get(), shared_output_texture_.Get());
             const uint64_t update_tick = GetTickCount64();
-            if (correction_updated_tick_ms_ && update_tick >= correction_updated_tick_ms_ &&
-                update_tick - correction_updated_tick_ms_ <= 25)
-                correction_stable_updates_ = std::min(correction_stable_updates_ + 1, 5u);
-            else
-                correction_stable_updates_ = 0;
+            if (worker_processing_time_us_ && worker_processing_time_us_ <= 15000) {
+                correction_fast_updates_ = std::min(correction_fast_updates_ + 1, 15u);
+                correction_slow_updates_ = 0;
+                if (correction_fast_updates_ >= 15) correction_timing_fast_ = true;
+            } else if (worker_processing_time_us_ >= 20000) {
+                correction_slow_updates_ = std::min(correction_slow_updates_ + 1, 5u);
+                correction_fast_updates_ = 0;
+                if (correction_slow_updates_ >= 5) correction_timing_fast_ = false;
+            }
             correction_updated_tick_ms_ = update_tick;
             correction_available_ = true;
             ++worker_output_frames_;
@@ -312,7 +318,8 @@ void D3D11Renderer::render(const VideoFrame& frame)
     }
     const uint64_t now = GetTickCount64();
     correction_active_ = correction_enabled_ && correction_available_ &&
-        correction_stable_updates_ >= 4 && now >= correction_updated_tick_ms_ &&
+        correction_timing_fast_ &&
+        now >= correction_updated_tick_ms_ &&
         now - correction_updated_tick_ms_ <= 40;
     if (correction_active_) {
         render_with_correction();

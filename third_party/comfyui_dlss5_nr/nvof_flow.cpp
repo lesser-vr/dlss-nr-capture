@@ -105,7 +105,6 @@ struct OfaState {
 
     LUID adapter_luid{};
     bool have_luid = false;
-    std::vector<uint8_t> luma_bgra;
 };
 
 static OfaState g_ofa;
@@ -205,7 +204,6 @@ static void CloseSessionInternal() {
     g_ofa.current = 0;
     g_ofa.primed = false;
     g_ofa.have_luid = false;
-    g_ofa.luma_bgra.clear();
 }
 
 static bool EnsureFunctionTable(std::string& error) {
@@ -260,9 +258,11 @@ static ComPtr<ID3D11Texture2D> MakeTexture(
     return tex;
 }
 
-static bool OpenSession(IDXGIAdapter1* adapter, uint32_t width, uint32_t height, std::string& error) {
-    if (!adapter) {
-        error = "NVIDIA Optical Flow: selected DXGI adapter is null.";
+static bool OpenSession(IDXGIAdapter1* adapter, ID3D11Device* device,
+                        ID3D11DeviceContext* context, uint32_t width,
+                        uint32_t height, std::string& error) {
+    if (!adapter || !device || !context) {
+        error = "NVIDIA Optical Flow: selected adapter or D3D11 device is null.";
         return false;
     }
     if (!EnsureFunctionTable(error)) return false;
@@ -274,31 +274,15 @@ static bool OpenSession(IDXGIAdapter1* adapter, uint32_t width, uint32_t height,
     }
 
     if (g_ofa.session && g_ofa.width == width && g_ofa.height == height &&
-        g_ofa.have_luid && SameLuid(g_ofa.adapter_luid, ad.AdapterLuid)) {
+        g_ofa.have_luid && SameLuid(g_ofa.adapter_luid, ad.AdapterLuid) &&
+        g_ofa.device.Get() == device) {
         return true;
     }
 
     CloseSessionInternal();
 
-    D3D_FEATURE_LEVEL feature_level{};
-    UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
-    HRESULT hr = D3D11CreateDevice(
-        adapter,
-        D3D_DRIVER_TYPE_UNKNOWN,
-        nullptr,
-        flags,
-        nullptr,
-        0,
-        D3D11_SDK_VERSION,
-        g_ofa.device.GetAddressOf(),
-        &feature_level,
-        g_ofa.context.GetAddressOf());
-    if (FAILED(hr) || !g_ofa.device || !g_ofa.context) {
-        char msg[256];
-        std::snprintf(msg, sizeof(msg), "NVIDIA Optical Flow: D3D11CreateDevice on the selected NVIDIA adapter failed: 0x%08X.", static_cast<unsigned>(hr));
-        error = msg;
-        return false;
-    }
+    g_ofa.device = device;
+    g_ofa.context = context;
 
     g_ofa.width = width;
     g_ofa.height = height;
@@ -372,36 +356,16 @@ static bool OpenSession(IDXGIAdapter1* adapter, uint32_t width, uint32_t height,
 
     g_ofa.current = 0;
     g_ofa.primed = false;
-    g_ofa.luma_bgra.resize(static_cast<size_t>(width) * height * 4);
     return true;
-}
-
-static void UploadLuma(const float* rgb) {
-    const size_t pixels = static_cast<size_t>(g_ofa.width) * g_ofa.height;
-    if (g_ofa.luma_bgra.size() != pixels * 4) g_ofa.luma_bgra.resize(pixels * 4);
-
-    for (size_t i = 0; i < pixels; ++i) {
-        const float r = std::clamp(rgb[i * 3 + 0], 0.0f, 1.0f);
-        const float g = std::clamp(rgb[i * 3 + 1], 0.0f, 1.0f);
-        const float b = std::clamp(rgb[i * 3 + 2], 0.0f, 1.0f);
-        const float y = std::clamp(0.2126f * r + 0.7152f * g + 0.0722f * b, 0.0f, 1.0f);
-        const uint8_t v = static_cast<uint8_t>(std::lround(y * 255.0f));
-        g_ofa.luma_bgra[i * 4 + 0] = v;
-        g_ofa.luma_bgra[i * 4 + 1] = v;
-        g_ofa.luma_bgra[i * 4 + 2] = v;
-        g_ofa.luma_bgra[i * 4 + 3] = 255;
-    }
-
-    g_ofa.context->UpdateSubresource(
-        g_ofa.src[g_ofa.current].Get(), 0, nullptr,
-        g_ofa.luma_bgra.data(), g_ofa.width * 4, 0);
 }
 
 } // namespace
 
 bool NvofPrepareFrame(
     IDXGIAdapter1* adapter,
-    const float* rgb,
+    ID3D11Device* device,
+    ID3D11DeviceContext* context,
+    ID3D11Texture2D* texture,
     uint32_t width,
     uint32_t height,
     bool reset,
@@ -410,11 +374,11 @@ bool NvofPrepareFrame(
 
     out = NvofFlowFrame{};
     error.clear();
-    if (!rgb || width == 0 || height == 0) {
-        error = "NVIDIA Optical Flow: invalid RGB frame or dimensions.";
+    if (!device || !context || !texture || width == 0 || height == 0) {
+        error = "NVIDIA Optical Flow: invalid D3D11 texture or dimensions.";
         return false;
     }
-    if (!OpenSession(adapter, width, height, error)) return false;
+    if (!OpenSession(adapter, device, context, width, height, error)) return false;
 
     if (reset) {
         // disableTemporalHints=1 makes the pairwise estimator independent of any
@@ -424,7 +388,7 @@ bool NvofPrepareFrame(
         g_ofa.primed = false;
     }
 
-    UploadLuma(rgb);
+    context->CopyResource(g_ofa.src[g_ofa.current].Get(), texture);
 
     if (!g_ofa.primed) {
         // There is no previous frame. Prime one input slot and let DLSS receive

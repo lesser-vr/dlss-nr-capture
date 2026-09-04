@@ -3,7 +3,7 @@
 #include <cstdint>
 
 constexpr uint32_t nr_worker_protocol_magic = 0x4E525743; // NRWC
-constexpr uint32_t nr_worker_protocol_version = 5;
+constexpr uint32_t nr_worker_protocol_version = 6;
 constexpr uint32_t nr_worker_max_mask_tiles = 256;
 
 enum TemporalFlags : uint32_t {
@@ -37,6 +37,15 @@ struct WorkerTemporalState {
     volatile LONG sequence{};
     volatile LONG64 worker_heartbeat_ms{};
     volatile LONG64 worker_processed_frames{};
+    volatile LONG64 nr_total_us{};
+    volatile LONG64 nr_input_us{};
+    volatile LONG64 nr_setup_us{};
+    volatile LONG64 nr_optical_flow_us{};
+    volatile LONG64 nr_motion_vector_us{};
+    volatile LONG64 nr_gpu_prepare_us{};
+    volatile LONG64 nr_gpu_execute_us{};
+    volatile LONG64 nr_bridge_output_us{};
+    volatile LONG64 nr_correction_output_us{};
     volatile LONG worker_adapter_state{};
     volatile LONG worker_adapter_error{};
     volatile LONG nr_enabled{};

@@ -642,12 +642,31 @@ std::wstring App::nr_worker_status() const
             : (renderer_.worker_correction_too_slow()
                 ? L"NR too slow - original only"
                 : L"original only");
+        std::wstring timing;
+        if (adapter == 2 && frames) {
+            const auto milliseconds = [](volatile LONG64* value) {
+                const uint64_t us = static_cast<uint64_t>(InterlockedCompareExchange64(value, 0, 0));
+                return std::to_wstring((us + 500) / 1000);
+            };
+            const uint64_t output_us = static_cast<uint64_t>(InterlockedCompareExchange64(
+                &temporal_state_->nr_bridge_output_us, 0, 0)) +
+                static_cast<uint64_t>(InterlockedCompareExchange64(
+                    &temporal_state_->nr_correction_output_us, 0, 0));
+            timing = L", NR " + milliseconds(&temporal_state_->nr_total_us) +
+                L" ms [in " + milliseconds(&temporal_state_->nr_input_us) +
+                L", setup " + milliseconds(&temporal_state_->nr_setup_us) +
+                L", flow " + milliseconds(&temporal_state_->nr_optical_flow_us) +
+                L", MV " + milliseconds(&temporal_state_->nr_motion_vector_us) +
+                L", prep " + milliseconds(&temporal_state_->nr_gpu_prepare_us) +
+                L", GPU " + milliseconds(&temporal_state_->nr_gpu_execute_us) +
+                L", out " + std::to_wstring((output_us + 500) / 1000) + L"]";
+        }
         return L"GPU worker connected [" + adapter_name + L", " +
                std::to_wstring(frames) + L" processed, " +
                std::to_wstring(renderer_.worker_output_frames()) + L" corrections, " +
                std::to_wstring(renderer_.worker_enhanced_frames()) + L" enhanced, " +
                std::to_wstring(renderer_.worker_fallback_frames()) + L" original, " +
-               correction_state + L"]";
+               correction_state + timing + L"]";
     }
     if (worker_process_.hProcess) {
         DWORD code = STILL_ACTIVE;
@@ -855,6 +874,10 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             const LONG adapter = temporal_state_
                 ? InterlockedCompareExchange(&temporal_state_->worker_adapter_state, 0, 0) : 0;
             renderer_.set_worker_correction_enabled(nr_enabled_ && adapter == 2);
+            const uint64_t nr_processing_us = temporal_state_
+                ? static_cast<uint64_t>(InterlockedCompareExchange64(
+                    &temporal_state_->nr_total_us, 0, 0)) : 0;
+            renderer_.set_worker_processing_time_us(nr_processing_us);
             renderer_.render(*frame);
             const uint64_t now = GetTickCount64();
             last_present_latency_ms_ = frame->arrival_tick_ms && now >= frame->arrival_tick_ms

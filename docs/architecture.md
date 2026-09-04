@@ -14,7 +14,13 @@ pipeline.
 - Rendering runs on the window thread for this milestone.
 - GPU processing runs in a dedicated worker with separate keyed-mutex input and output textures.
 - The worker publishes encoded NR correction data; the renderer applies it to the newest live frame.
-- Corrections are displayed only after five consecutive updates no more than 25 ms apart and remain active only while fresher than 40 ms. Slower correction streams fall back to the live original so motion remains stable.
+- Corrections are displayed after 15 consecutive NR results at 15 ms or faster and disabled after five consecutive results at 20 ms or slower. This hysteresis absorbs scheduler jitter while keeping sub-realtime output on the original frame; active corrections must remain fresher than 40 ms.
+- The worker publishes per-frame input, optical-flow, GPU preparation/execution, and output timings for live bottleneck diagnosis.
+- Coarse NVOF vectors are uploaded once and expanded into the full-resolution normalized motion-vector texture by a D3D12 compute shader.
+- DLSS readback is converted directly into the encoded BGRA8 correction buffer, combining channel detection, rejection masking, and residual calculation without an intermediate float RGB output.
+- After one-time channel-order detection, D3D12 renders corrections directly into a shared BGRA8 target. D3D11 opens that target and performs a synchronized GPU copy, avoiding steady-state CPU output readback and upload.
+- BGRA8 input pixels use a compact upload buffer and a D3D12 compute shader converts them directly into the RGBA16F DLSS color texture.
+- NVOF GPU-copies the worker''s D3D11 BGRA texture into its registered ping-pong inputs, eliminating the CPU RGB/luma conversion and upload path.
 
 This intentionally prefers a dropped frame over accumulated input latency.
 

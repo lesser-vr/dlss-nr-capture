@@ -18,7 +18,7 @@ VideoFrame solid(uint32_t width, uint32_t height, uint8_t value, uint64_t sequen
 }
 
 int wmain(int argc, wchar_t** argv) {
-    check(nr_worker_protocol_version == 5, "worker protocol version changed unexpectedly");
+    check(nr_worker_protocol_version == 6, "worker protocol version changed unexpectedly");
     WorkerTemporalState state{};
     check(state.magic == nr_worker_protocol_magic, "protocol magic default");
     check(state.byte_size == sizeof(WorkerTemporalState), "protocol byte size default");
@@ -59,7 +59,8 @@ int wmain(int argc, wchar_t** argv) {
                 check(get_api(nr_adapter_abi_version + 1) == nullptr, "adapter rejects wrong ABI");
                 const NrAdapterApi* api = get_api(nr_adapter_abi_version);
                 check(api && api->byte_size >= sizeof(NrAdapterApi), "adapter API size");
-                check(api && api->initialize && api->process && api->shutdown && api->last_error, "adapter callbacks");
+                check(api && api->initialize && api->process && api->shutdown && api->last_error &&
+                      api->get_timings, "adapter callbacks");
                 if (api && api->last_error) check(std::wstring(api->last_error()).empty(), "adapter error default");
             }
             FreeLibrary(module);
@@ -73,7 +74,10 @@ int wmain(int argc, wchar_t** argv) {
         if (bridge) {
             check(GetProcAddress(bridge, "dlss5nr_init") != nullptr, "bridge init export");
             check(GetProcAddress(bridge, "dlss5nr_process") != nullptr, "bridge process export");
+            check(GetProcAddress(bridge, "dlss5nr_create_correction_target") != nullptr,
+                  "bridge shared correction target export");
             check(GetProcAddress(bridge, "dlss5nr_shutdown") != nullptr, "bridge shutdown export");
+            check(GetProcAddress(bridge, "dlss5nr_get_timings") != nullptr, "bridge timings export");
             FreeLibrary(bridge);
         }
     } else check(false, "runtime bridge path argument missing");

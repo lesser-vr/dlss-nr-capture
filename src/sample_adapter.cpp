@@ -6,9 +6,10 @@ bool __stdcall process(ID3D11DeviceContext*, ID3D11Texture2D*,
                        const TemporalAnalysisPayload*) { return true; }
 void __stdcall shutdown() {}
 const wchar_t* __stdcall last_error() { return L""; }
+void __stdcall get_timings(NrTimingSnapshot* result) { if (result) *result = {}; }
 const NrAdapterApi api{
     sizeof(NrAdapterApi), nr_adapter_abi_version, L"Sample passthrough",
-    initialize, process, shutdown, last_error
+    initialize, process, shutdown, last_error, get_timings
 };
 }
 

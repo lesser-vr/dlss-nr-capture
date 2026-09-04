@@ -32,6 +32,7 @@ public:
     }
     void set_worker_wait_ms(uint32_t value) noexcept { worker_wait_ms_ = value; }
     void set_worker_correction_enabled(bool value) noexcept { correction_enabled_ = value; }
+    void set_worker_processing_time_us(uint64_t value) noexcept { worker_processing_time_us_ = value; }
 
 private:
     void ensure_frame_texture(uint32_t width, uint32_t height);
@@ -78,7 +79,10 @@ private:
     uint64_t worker_enhanced_frames_{};
     uint64_t worker_fallback_frames_{};
     uint64_t correction_updated_tick_ms_{};
-    uint32_t correction_stable_updates_{};
+    uint64_t worker_processing_time_us_{};
+    uint32_t correction_fast_updates_{};
+    uint32_t correction_slow_updates_{};
+    bool correction_timing_fast_{};
     uint32_t worker_wait_ms_{2};
     bool correction_enabled_{};
     bool correction_available_{};

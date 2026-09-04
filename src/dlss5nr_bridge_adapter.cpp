@@ -1,27 +1,46 @@
 #include "nr_adapter_api.hpp"
 #include <windows.h>
 #include <d3d11.h>
+#include <d3d11_1.h>
+#include <dxgi1_2.h>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <string>
 #include <vector>
 
 namespace {
 using BridgeInit = int (__cdecl*)(int, const wchar_t*, char*, int);
-using BridgeProcess = int (__cdecl*)(const float*, float*, int, int, int, int,
-                                     float, float, float, float, int, int, int, char*, int);
+using BridgeCreateCorrectionTarget = int (__cdecl*)(int, int, HANDLE*, char*, int);
+using BridgeProcess = int (__cdecl*)(ID3D11Device*, ID3D11DeviceContext*, ID3D11Texture2D*,
+                                     const uint8_t*, int, int, int, int,
+                                     float, float, float, float, int, int, int,
+                                     const uint8_t*, int, int, char*, int);
 using BridgeShutdown = void (__cdecl*)();
+using BridgeGetTimings = void (__cdecl*)(NrTimingSnapshot*);
 
 HMODULE bridge_module{};
 BridgeInit bridge_init{};
+BridgeCreateCorrectionTarget bridge_create_correction_target{};
 BridgeProcess bridge_process{};
 BridgeShutdown bridge_shutdown{};
+BridgeGetTimings bridge_get_timings{};
 ID3D11Device* device{};
 ID3D11Texture2D* staging{};
+ID3D11Texture2D* gpu_correction{};
+ID3D11Query* correction_copy_query{};
+HANDLE gpu_correction_handle{};
 D3D11_TEXTURE2D_DESC input_description{};
-std::vector<float> rgb_input;
-std::vector<float> rgb_output;
+std::vector<uint8_t> bgra_input;
 std::wstring last_error_message;
+NrTimingSnapshot last_timings{};
+
+using TimingClock = std::chrono::steady_clock;
+uint64_t elapsed_us(TimingClock::time_point start, TimingClock::time_point end)
+{
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(end - start).count());
+}
 
 void set_last_error(const char* message)
 {
@@ -34,6 +53,7 @@ void set_last_error(const char* message)
 }
 
 const wchar_t* __stdcall last_error() { return last_error_message.c_str(); }
+void __stdcall get_timings(NrTimingSnapshot* result) { if (result) *result = last_timings; }
 
 std::wstring module_directory()
 {
@@ -64,8 +84,12 @@ bool __stdcall initialize(ID3D11Device* supplied_device, const D3D11_TEXTURE2D_D
     if (!bridge_module) { last_error_message = L"Cannot load nr-runtime\\dlss5nr_bridge.dll"; return false; }
     bridge_init = reinterpret_cast<BridgeInit>(GetProcAddress(bridge_module, "dlss5nr_init"));
     bridge_process = reinterpret_cast<BridgeProcess>(GetProcAddress(bridge_module, "dlss5nr_process"));
+    bridge_create_correction_target = reinterpret_cast<BridgeCreateCorrectionTarget>(
+        GetProcAddress(bridge_module, "dlss5nr_create_correction_target"));
     bridge_shutdown = reinterpret_cast<BridgeShutdown>(GetProcAddress(bridge_module, "dlss5nr_shutdown"));
-    if (!bridge_init || !bridge_process || !bridge_shutdown) {
+    bridge_get_timings = reinterpret_cast<BridgeGetTimings>(GetProcAddress(bridge_module, "dlss5nr_get_timings"));
+    if (!bridge_init || !bridge_create_correction_target || !bridge_process ||
+        !bridge_shutdown || !bridge_get_timings) {
         last_error_message = L"Required dlss5nr_bridge exports are missing";
         return false;
     }
@@ -88,9 +112,28 @@ bool __stdcall initialize(ID3D11Device* supplied_device, const D3D11_TEXTURE2D_D
         last_error_message = L"Cannot create the NR staging texture";
         return false;
     }
-    const size_t values = static_cast<size_t>(description->Width) * description->Height * 3;
-    rgb_input.resize(values);
-    rgb_output.resize(values);
+    if (!bridge_create_correction_target(static_cast<int>(description->Width),
+            static_cast<int>(description->Height), &gpu_correction_handle,
+            error, static_cast<int>(sizeof(error)))) {
+        set_last_error(error);
+        return false;
+    }
+    ID3D11Device1* device1{};
+    if (FAILED(device->QueryInterface(IID_PPV_ARGS(&device1))) ||
+        FAILED(device1->OpenSharedResource1(gpu_correction_handle,
+                                            IID_PPV_ARGS(&gpu_correction)))) {
+        if (device1) device1->Release();
+        last_error_message = L"Cannot open the D3D12 correction target in D3D11";
+        return false;
+    }
+    device1->Release();
+    D3D11_QUERY_DESC query_description{};
+    query_description.Query = D3D11_QUERY_EVENT;
+    if (FAILED(device->CreateQuery(&query_description, &correction_copy_query))) {
+        last_error_message = L"Cannot create the GPU correction copy fence";
+        return false;
+    }
+    bgra_input.resize(static_cast<size_t>(description->Width) * description->Height * 4);
     return true;
 }
 
@@ -98,75 +141,58 @@ bool __stdcall process(ID3D11DeviceContext* context, ID3D11Texture2D* texture,
                        const TemporalAnalysisPayload* temporal)
 {
     if (!context || !texture || !temporal || !staging || !bridge_process) return false;
+    const auto frame_start = TimingClock::now();
+    last_timings = {};
     context->CopyResource(staging, texture);
     D3D11_MAPPED_SUBRESOURCE mapped{};
     if (FAILED(context->Map(staging, 0, D3D11_MAP_READ, 0, &mapped))) return false;
     const uint32_t width = input_description.Width, height = input_description.Height;
     for (uint32_t y = 0; y < height; ++y) {
         const auto* row = static_cast<const uint8_t*>(mapped.pData) + static_cast<size_t>(y) * mapped.RowPitch;
-        float* target = rgb_input.data() + static_cast<size_t>(y) * width * 3;
-        for (uint32_t x = 0; x < width; ++x) {
-            target[x * 3] = row[x * 4 + 2] / 255.0f;
-            target[x * 3 + 1] = row[x * 4 + 1] / 255.0f;
-            target[x * 3 + 2] = row[x * 4] / 255.0f;
-        }
+        memcpy(bgra_input.data() + static_cast<size_t>(y) * width * 4, row,
+               static_cast<size_t>(width) * 4);
     }
     context->Unmap(staging, 0);
+    const auto input_end = TimingClock::now();
+    last_timings.input_us = elapsed_us(frame_start, input_end);
 
     const bool reject_history = (temporal->flags & (temporal_scene_cut | temporal_reject_all)) != 0;
     char error[1024]{};
-    if (!bridge_process(rgb_input.data(), rgb_output.data(), static_cast<int>(width),
+    if (!bridge_process(device, context, texture, bgra_input.data(), static_cast<int>(width),
             static_cast<int>(height), temporal->nr_style, temporal->nr_preset,
             temporal->nr_intensity_percent / 100.0f, 1.0f, 1.0f, -1.0f,
             temporal->nr_automask ? 1 : 0, reject_history ? 1 : 0,
             (!reject_history && temporal->nr_temporal) ? 1 : 0,
+            temporal->rejection_mask, temporal->mask_columns, temporal->mask_rows,
             error, static_cast<int>(sizeof(error)))) {
         set_last_error(error);
         return false;
     }
+    const auto bridge_end = TimingClock::now();
+    bridge_get_timings(&last_timings);
+    last_timings.input_us = elapsed_us(frame_start, input_end);
     last_error_message.clear();
 
-    double direct_error = 0.0, swapped_error = 0.0;
-    for (size_t i = 0; i < rgb_output.size(); i += 192) {
-        direct_error += std::abs(rgb_output[i] - rgb_input[i]) +
-                        std::abs(rgb_output[i + 2] - rgb_input[i + 2]);
-        swapped_error += std::abs(rgb_output[i + 2] - rgb_input[i]) +
-                         std::abs(rgb_output[i] - rgb_input[i + 2]);
-    }
-    const bool swap_channels = swapped_error < direct_error;
-
-    if (FAILED(context->Map(staging, 0, D3D11_MAP_WRITE, 0, &mapped))) return false;
-    for (uint32_t y = 0; y < height; ++y) {
-        auto* row = static_cast<uint8_t*>(mapped.pData) + static_cast<size_t>(y) * mapped.RowPitch;
-        const float* source = rgb_output.data() + static_cast<size_t>(y) * width * 3;
-        for (uint32_t x = 0; x < width; ++x) {
-            const float r = source[x * 3 + (swap_channels ? 2 : 0)];
-            const float g = source[x * 3 + 1];
-            const float b = source[x * 3 + (swap_channels ? 0 : 2)];
-            const float input_r = rgb_input[(static_cast<size_t>(y) * width + x) * 3];
-            const float input_g = rgb_input[(static_cast<size_t>(y) * width + x) * 3 + 1];
-            const float input_b = rgb_input[(static_cast<size_t>(y) * width + x) * 3 + 2];
-            bool reject = false;
-            if (temporal->mask_columns && temporal->mask_rows) {
-                const uint32_t column = std::min<uint32_t>(temporal->mask_columns - 1,
-                    x * temporal->mask_columns / width);
-                const uint32_t mask_row = std::min<uint32_t>(temporal->mask_rows - 1,
-                    y * temporal->mask_rows / height);
-                const size_t mask_index = static_cast<size_t>(mask_row) * temporal->mask_columns + column;
-                reject = mask_index < nr_worker_max_mask_tiles && temporal->rejection_mask[mask_index] != 0;
-            }
-            auto encode = [reject](float delta) {
-                if (reject) delta = 0.0f;
-                return static_cast<uint8_t>(std::clamp(0.5f + delta * 2.0f, 0.0f, 1.0f) * 255.0f + 0.5f);
-            };
-            row[x * 4] = encode(b - input_b);
-            row[x * 4 + 1] = encode(g - input_g);
-            row[x * 4 + 2] = encode(r - input_r);
-            row[x * 4 + 3] = 255;
+    context->CopyResource(texture, gpu_correction);
+    context->End(correction_copy_query);
+    context->Flush();
+    const uint64_t copy_deadline = GetTickCount64() + 1000;
+    for (;;) {
+        const HRESULT copy_status = context->GetData(correction_copy_query, nullptr, 0, 0);
+        if (copy_status == S_OK) break;
+        if (copy_status != S_FALSE) {
+            last_error_message = L"GPU correction copy query failed";
+            return false;
         }
+        if (GetTickCount64() >= copy_deadline) {
+            last_error_message = L"Timed out waiting for the GPU correction copy";
+            return false;
+        }
+        Sleep(0);
     }
-    context->Unmap(staging, 0);
-    context->CopyResource(texture, staging);
+    const auto frame_end = TimingClock::now();
+    last_timings.correction_output_us = elapsed_us(bridge_end, frame_end);
+    last_timings.total_us = elapsed_us(frame_start, frame_end);
     return true;
 }
 
@@ -174,15 +200,20 @@ void __stdcall shutdown()
 {
     if (bridge_shutdown) bridge_shutdown();
     if (staging) { staging->Release(); staging = nullptr; }
+    if (gpu_correction) { gpu_correction->Release(); gpu_correction = nullptr; }
+    if (correction_copy_query) { correction_copy_query->Release(); correction_copy_query = nullptr; }
+    if (gpu_correction_handle) { CloseHandle(gpu_correction_handle); gpu_correction_handle = nullptr; }
     if (device) { device->Release(); device = nullptr; }
     if (bridge_module) { FreeLibrary(bridge_module); bridge_module = nullptr; }
-    bridge_init = nullptr; bridge_process = nullptr; bridge_shutdown = nullptr;
-    rgb_input.clear(); rgb_output.clear();
+    bridge_init = nullptr; bridge_create_correction_target = nullptr;
+    bridge_process = nullptr; bridge_shutdown = nullptr;
+    bridge_get_timings = nullptr;
+    bgra_input.clear();
 }
 
 const NrAdapterApi api{
     sizeof(NrAdapterApi), nr_adapter_abi_version, L"DLSS 5 NR bridge",
-    initialize, process, shutdown, last_error
+    initialize, process, shutdown, last_error, get_timings
 };
 }
 

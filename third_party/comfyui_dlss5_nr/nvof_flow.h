@@ -7,6 +7,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <d3d11.h>
 #include <dxgi1_4.h>
 
 #include <cstdint>
@@ -23,13 +24,15 @@ struct NvofFlowFrame {
     std::vector<int16_t> xy;
 };
 
-// Prepare the temporal optical-flow field for one raw RGB input frame.
+// Prepare flow from a BGRA texture on the caller''s D3D11 device.
 // - reset=true starts a new sequence; this frame only primes the previous-frame slot.
 // - on the first frame out.has_flow is false and the caller should supply zero MVs.
 // - subsequent frames return current->previous flow, matching the DLSS reprojection direction.
 bool NvofPrepareFrame(
     IDXGIAdapter1* adapter,
-    const float* rgb,
+    ID3D11Device* device,
+    ID3D11DeviceContext* context,
+    ID3D11Texture2D* texture,
     uint32_t width,
     uint32_t height,
     bool reset,

@@ -54,9 +54,9 @@ add_library(dlss5nr-runtime-bridge SHARED
     third_party/comfyui_dlss5_nr/dlss5nr_bridge.cpp
     third_party/comfyui_dlss5_nr/nvof_flow.cpp
 )
-target_include_directories(dlss5nr-runtime-bridge PRIVATE third_party/comfyui_dlss5_nr)
+target_include_directories(dlss5nr-runtime-bridge PRIVATE third_party/comfyui_dlss5_nr src)
 target_compile_options(dlss5nr-runtime-bridge PRIVATE /W4 /permissive- /EHsc /utf-8)
-target_link_libraries(dlss5nr-runtime-bridge PRIVATE d3d12 d3d11 dxgi ole32)
+target_link_libraries(dlss5nr-runtime-bridge PRIVATE d3d12 d3d11 d3dcompiler dxgi ole32)
 set_target_properties(dlss5nr-runtime-bridge PROPERTIES
     OUTPUT_NAME "dlss5nr_bridge"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/nr-runtime"

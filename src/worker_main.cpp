@@ -19,6 +19,7 @@ public:
     virtual LONG state_code() const noexcept = 0;
     virtual const wchar_t* name() const noexcept = 0;
     virtual const wchar_t* error_message() const noexcept = 0;
+    virtual NrTimingSnapshot timings() const noexcept = 0;
 };
 
 class PassthroughNrAdapter final : public INrAdapter {
@@ -29,6 +30,7 @@ public:
     LONG state_code() const noexcept override { return 1; }
     const wchar_t* name() const noexcept override { return L"Passthrough"; }
     const wchar_t* error_message() const noexcept override { return L""; }
+    NrTimingSnapshot timings() const noexcept override { return {}; }
 };
 
 class ExternalNrAdapter final : public INrAdapter {
@@ -48,7 +50,8 @@ public:
         api_ = get_api(nr_adapter_abi_version);
         if (!api_ || api_->byte_size < sizeof(NrAdapterApi) ||
             api_->abi_version != nr_adapter_abi_version || !api_->initialize ||
-            !api_->process || !api_->shutdown || !api_->last_error || !api_->display_name) {
+            !api_->process || !api_->shutdown || !api_->last_error || !api_->get_timings ||
+            !api_->display_name) {
             error_ = 3; error_message_ = L"NR adapter ABI is incompatible"; return false;
         }
         if (!api_->initialize(device, &description)) {
@@ -72,6 +75,11 @@ public:
         return api_ && api_->display_name ? api_->display_name : L"External";
     }
     const wchar_t* error_message() const noexcept override { return error_message_.c_str(); }
+    NrTimingSnapshot timings() const noexcept override {
+        NrTimingSnapshot result{};
+        if (api_ && api_->get_timings) api_->get_timings(&result);
+        return result;
+    }
 private:
     std::wstring path_;
     LONG& error_;
@@ -186,6 +194,16 @@ int wmain(int argc, wchar_t** argv)
                     consecutive_failures = 0;
                     last_sequence = payload.frame_sequence;
                     InterlockedIncrement64(&temporal->worker_processed_frames);
+                    const NrTimingSnapshot timing = adapter->timings();
+                    InterlockedExchange64(&temporal->nr_total_us, static_cast<LONG64>(timing.total_us));
+                    InterlockedExchange64(&temporal->nr_input_us, static_cast<LONG64>(timing.input_us));
+                    InterlockedExchange64(&temporal->nr_setup_us, static_cast<LONG64>(timing.setup_us));
+                    InterlockedExchange64(&temporal->nr_optical_flow_us, static_cast<LONG64>(timing.optical_flow_us));
+                    InterlockedExchange64(&temporal->nr_motion_vector_us, static_cast<LONG64>(timing.motion_vector_us));
+                    InterlockedExchange64(&temporal->nr_gpu_prepare_us, static_cast<LONG64>(timing.gpu_prepare_us));
+                    InterlockedExchange64(&temporal->nr_gpu_execute_us, static_cast<LONG64>(timing.gpu_execute_us));
+                    InterlockedExchange64(&temporal->nr_bridge_output_us, static_cast<LONG64>(timing.bridge_output_us));
+                    InterlockedExchange64(&temporal->nr_correction_output_us, static_cast<LONG64>(timing.correction_output_us));
                     if (!signaled) { SetEvent(ready); signaled = true; }
                 } else if (++consecutive_failures >= 3 && adapter->state_code() == 2) {
                     adapter_error_message = adapter->error_message();
