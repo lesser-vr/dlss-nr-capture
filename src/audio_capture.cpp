@@ -1,5 +1,6 @@
 #include "audio_capture.hpp"
 #include "audio_output_queue.hpp"
+#include "audio_delay_queue.hpp"
 #include <functiondiscoverykeys_devpkey.h>
 #include <chrono>
 #include <cstring>
@@ -54,23 +55,33 @@ void AudioCapture::capture_loop(AudioCaptureDevice device) {
   ComPtr<IAudioClient> client; throw_if_failed(device.device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(client.GetAddressOf())), "Activate audio capture device");
   throw_if_failed(client->GetMixFormat(&format), "Get audio capture format");
   WaveOutputBackend backend;
-  AudioOutputQueue output(backend);
+  AudioOutputQueue output(backend, std::max<size_t>(format->nAvgBytesPerSec / 5, format->nBlockAlign));
   MMRESULT result = waveOutOpen(&backend.handle, WAVE_MAPPER, format, 0, 0, CALLBACK_NULL);
   if (result != MMSYSERR_NOERROR) throw wave_error("Open default audio output", result);
   throw_if_failed(client->Initialize(AUDCLNT_SHAREMODE_SHARED, 0, 1000000, 0, format, nullptr), "Initialize audio capture");
   ComPtr<IAudioCaptureClient> capture; throw_if_failed(client->GetService(IID_PPV_ARGS(&capture)), "Create audio capture client"); throw_if_failed(client->Start(), "Start audio capture");
   AudioClientStop stop_client{client.Get()};
+  AudioDelayQueue delayed;
+  uint32_t delay = delay_ms_.load();
   while (!stopping_.load()) {
+   const uint32_t requested = delay_ms_.load();
+   if (requested != delay) { delayed.clear(); output.discard(); delay = requested; }
    output.reap();
    UINT32 packets{}; throw_if_failed(capture->GetNextPacketSize(&packets), "Read audio packet size");
    while (packets > 0 && !stopping_.load()) {
     BYTE* data{}; UINT32 frames{}; DWORD flags{}; throw_if_failed(capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr), "Read audio packet");
     {
      AudioPacketLease lease{capture.Get(), frames};
-     output.submit(data, frames * format->nBlockAlign, (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0);
+     delayed.push(GetTickCount64(), delay, data, frames * format->nBlockAlign,
+         (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0,
+         static_cast<size_t>(format->nAvgBytesPerSec) * (delay + 200) / 1000);
     }
     throw_if_failed(capture->GetNextPacketSize(&packets), "Read next audio packet size");
-   } std::this_thread::sleep_for(std::chrono::milliseconds(2));
+   }
+   delayed.drain(GetTickCount64(), [&](const auto& bytes) {
+       output.submit(bytes.data(), static_cast<DWORD>(bytes.size()), false);
+   });
+   std::this_thread::sleep_for(std::chrono::milliseconds(2));
   }
  } catch (const std::exception& error) { if (!stopping_.load() && on_error_) on_error_(L"Audio capture failed: " + widen(error.what())); }
  if (format) CoTaskMemFree(format); if (SUCCEEDED(initialized)) CoUninitialize();

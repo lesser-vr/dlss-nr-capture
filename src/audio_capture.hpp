@@ -16,7 +16,9 @@ public:
  AudioCapture(const AudioCapture&) = delete; AudioCapture& operator=(const AudioCapture&) = delete;
  static std::vector<AudioCaptureDevice> enumerate_devices();
  void start(const AudioCaptureDevice& device, ErrorCallback on_error); void stop();
+ void set_delay_ms(uint32_t value) { delay_ms_.store(value > 200 ? 200 : value); }
 private:
  void capture_loop(AudioCaptureDevice device);
  std::atomic_bool stopping_{false}; std::thread thread_; ErrorCallback on_error_;
+ std::atomic_uint32_t delay_ms_{};
 };

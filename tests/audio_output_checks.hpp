@@ -1,5 +1,6 @@
 #pragma once
 #include "audio_output_queue.hpp"
+#include "audio_delay_queue.hpp"
 #include <algorithm>
 
 struct FakeAudioOutput {
@@ -77,4 +78,21 @@ void check_audio_output(Check check) {
     FakeAudioOutput empty;
     { AudioOutputQueue queue(empty); }
     check(empty.resets == 1 && empty.closes == 1, "audio output cleaned before first packet");
+    FakeAudioOutput bounded;
+    {
+        AudioOutputQueue queue(bounded, 4);
+        queue.submit(pcm, 4, false); queue.submit(pcm, 4, false);
+        check(bounded.resets == 1 && bounded.prepared.size() == 1, "audio backlog capped by reset before new audio");
+    }
+    AudioDelayQueue delayed;
+    int played = 0;
+    delayed.push(1000, 50, pcm, 4, false, 8);
+    delayed.drain(1049, [&](const auto&) { ++played; });
+    check(played == 0, "audio delay waits until due");
+    delayed.drain(1050, [&](const auto& bytes) { ++played; check(bytes[0] == 1, "delayed audio payload preserved"); });
+    check(played == 1 && delayed.bytes() == 0, "delayed audio drains exactly once");
+    for (int i = 0; i < 4; ++i) delayed.push(2000, 50, pcm, 4, false, 8);
+    check(delayed.bytes() == 8, "audio delay queue has bounded memory");
+    delayed.clear();
+    check(delayed.bytes() == 0, "audio delay change clears stale packets");
 }

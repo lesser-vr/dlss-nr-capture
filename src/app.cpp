@@ -34,6 +34,7 @@ constexpr UINT resolution_command_base = 46000;
 constexpr UINT frame_rate_command_base = 47000;
 constexpr UINT audio_off_command = 48000;
 constexpr UINT audio_command_base = 48100;
+constexpr UINT audio_delay_base = 48010;
 constexpr UINT fullscreen_command = 49000;
 constexpr UINT always_on_top_command = 49001;
 constexpr UINT auto_size_command = 49002;
@@ -211,6 +212,8 @@ void App::load_settings()
     has_saved_flip_ = read_dword(L"FlipVertical", flip);
     saved_flip_ = flip != 0;
     uint32_t value{};
+    if (read_dword(L"AudioDelayMs", value)) audio_delay_ms_ = std::min(value, 200u);
+    audio_capture_->set_delay_ms(audio_delay_ms_);
     if (read_dword(L"NrEnabled", value)) nr_enabled_ = value != 0;
     if (read_dword(L"NrTemporal", value)) nr_temporal_enabled_ = value != 0;
     if (read_dword(L"NrStyle", value)) nr_style_ = std::min(value, 3u);
@@ -239,6 +242,7 @@ void App::save_settings()
     write_string(L"VideoDeviceId", active_device_ ? devices_[*active_device_].symbolic_link : (capture_expected_ ? reconnect_device_link_ : L""));
     write_string(L"AudioDevice", audio_expected_ ? reconnect_audio_name_ : L"");
     write_string(L"AudioDeviceId", audio_expected_ ? reconnect_audio_id_ : L"");
+    write_dword(L"AudioDelayMs", audio_delay_ms_);
     if (active_mode_ || (capture_expected_ && reconnect_mode_)) {
         const auto& mode = active_mode_ ? modes_[*active_mode_] : *reconnect_mode_;
         write_string(L"VideoFormat", mode.format_name);
@@ -320,9 +324,7 @@ void App::discover_capture_devices()
                 performance_command, L"Performance overlay");
     AppendMenuW(view_menu_, MF_STRING, refresh_devices_command, L"Refresh devices");
     audio_menu_ = CreatePopupMenu();
-    AppendMenuW(audio_menu_, MF_STRING | MF_CHECKED, audio_off_command, L"Off");
-    for (size_t index = 0; index < audio_devices_.size(); ++index)
-        AppendMenuW(audio_menu_, MF_STRING, audio_command_base + static_cast<UINT>(index), audio_devices_[index].name.c_str());
+    rebuild_audio_menu();
     AppendMenuW(image_menu_, MF_STRING, flip_vertical_command, L"Flip vertically");
     for (size_t index = 0; index < devices_.size(); ++index)
         AppendMenuW(device_menu_, MF_STRING, device_command_base + static_cast<UINT>(index),
@@ -393,6 +395,11 @@ void App::rebuild_audio_menu()
                     audio_command_base + static_cast<UINT>(index), audio_devices_[index].name.c_str());
     if (audio_expected_ && !active_audio_device_)
         AppendMenuW(audio_menu_, MF_STRING | MF_GRAYED, 0, (L"Waiting: " + reconnect_audio_name_).c_str());
+    AppendMenuW(audio_menu_, MF_SEPARATOR, 0, nullptr);
+    const uint32_t delays[] = {0, 25, 50, 100, 200};
+    for (UINT i = 0; i < 5; ++i)
+        AppendMenuW(audio_menu_, MF_STRING | (audio_delay_ms_ == delays[i] ? MF_CHECKED : 0),
+                    audio_delay_base + i, (L"Audio delay: " + std::to_wstring(delays[i]) + L" ms").c_str());
     DrawMenuBar(window_);
 }
 
@@ -1169,6 +1176,7 @@ void App::copy_diagnostics()
     report.add(L"Capture input state", capture_interrupted_ ? L"Interrupted" : L"No interruption detected");
     report.add(L"Last capture recovery error", capture_recovery_error_);
     report.add(L"Audio selected", audio_expected_ ? reconnect_audio_name_ : L"Off");
+    report.add(L"Audio delay ms", audio_delay_ms_);
     report.add(L"Audio reconnect attempts", audio_recovery_attempts_);
     report.add(L"Last audio recovery error", audio_recovery_error_);
     report.add(L"Processing EMA us", renderer_.worker_average_processing_us());
@@ -1394,6 +1402,12 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             return 0;
         }
         if (command == audio_off_command) { start_audio_capture(audio_devices_.size()); return 0; }
+        if (command >= audio_delay_base && command < audio_delay_base + 5) {
+            const uint32_t delays[] = {0, 25, 50, 100, 200};
+            audio_delay_ms_ = delays[command - audio_delay_base];
+            audio_capture_->set_delay_ms(audio_delay_ms_);
+            rebuild_audio_menu(); save_settings(); return 0;
+        }
         if (command >= audio_command_base && command < audio_command_base + audio_devices_.size()) {
             start_audio_capture(command - audio_command_base); return 0;
         }

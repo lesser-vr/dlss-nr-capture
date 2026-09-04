@@ -147,6 +147,7 @@ private:
     std::atomic_uint64_t capture_generation_{};
     bool audio_expected_{};
     bool audio_failed_{};
+    uint32_t audio_delay_ms_{};
     std::wstring reconnect_audio_id_;
     std::wstring reconnect_audio_name_;
     std::wstring audio_recovery_error_;

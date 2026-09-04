@@ -159,7 +159,7 @@ try {
   }
   if ((Get-ItemProperty -LiteralPath $keyPs).AudioDevice -ne '') { throw 'Audio Off was not saved' }
   Write-Host 'audio missing-endpoint wait, selection preservation and Off cancellation passed'
-  foreach ($command in @(49001,49002,49004,51001,51102,51204,51301,51401)) { [void][RegressionUi]::SendMessage([IntPtr]$script:app.MainWindowHandle,0x111,[IntPtr]$command,[IntPtr]::Zero) }
+  foreach ($command in @(49001,49002,49004,51001,51102,51204,51301,51401,48012)) { [void][RegressionUi]::SendMessage([IntPtr]$script:app.MainWindowHandle,0x111,[IntPtr]$command,[IntPtr]::Zero) }
   Start-Sleep -Milliseconds 500
 
   $saved = Get-ItemProperty -LiteralPath $keyPs
