@@ -184,7 +184,17 @@ try {
   Assert-MenuCommand $restoredView 49002 $true
   Assert-MenuCommand $restoredView 49003 $false
   Assert-MenuCommand $restoredView 49004 $true
+  [void][RegressionUi]::PostMessage([IntPtr]$script:app.MainWindowHandle,0x802C,[IntPtr]::Zero,[IntPtr]::Zero)
+  for ($i=0; $i -lt 40; $i++) {
+    Start-Sleep -Milliseconds 100
+    $script:app.Refresh()
+    if ($script:app.MainWindowTitle -match 'Waiting for device driver') { break }
+  }
+  if ($script:app.MainWindowTitle -notmatch 'Waiting for device driver' -or -not $script:app.Responding) {
+    throw 'Driver stall did not keep window responsive'
+  }
   Close-TestApp $script:app
+  Write-Host 'stalled driver remains responsive and closes without orphan worker'
   $env:DLSS_NR_TEST_SUPPRESS_FRAMES = '1'
   $script:app = Start-TestApp
   $children = @()

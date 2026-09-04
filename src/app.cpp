@@ -4,6 +4,7 @@
 #include "capture_health.hpp"
 #include "audio_health.hpp"
 #include "device_refresh.hpp"
+#include "driver_call.hpp"
 #include <cstring>
 #include <iomanip>
 #include <sstream>
@@ -22,6 +23,7 @@ constexpr UINT capture_failed_message = WM_APP + 3;
 constexpr UINT audio_failed_message = WM_APP + 4;
 constexpr UINT test_capture_failure_message = WM_APP + 42;
 constexpr UINT test_audio_failure_message = WM_APP + 43;
+constexpr UINT test_driver_stall_message = WM_APP + 44;
 constexpr UINT_PTR health_timer_id = 1;
 constexpr UINT device_command_base = 41000;
 constexpr UINT mode_command_base = 42000;
@@ -170,8 +172,8 @@ int App::run(HINSTANCE instance, int show_command)
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }
-    capture_->stop();
-    audio_capture_->stop();
+    driver_call(window_, [&] { capture_->stop(); });
+    driver_call(window_, [&] { audio_capture_->stop(); });
     stop_nr_worker();
     capture_.reset();
     audio_capture_.reset();
@@ -260,13 +262,13 @@ void App::save_settings()
 
 void App::discover_capture_devices()
 {
-    devices_ = CaptureEngine::enumerate_devices();
+    devices_ = driver_call(window_, [] { return CaptureEngine::enumerate_devices(); });
     if (isolated_test_settings_) {
         wchar_t value[2]{};
         if (GetEnvironmentVariableW(L"DLSS_NR_TEST_NO_VIDEO", value, 2) == 1 && value[0] == L'1')
             { devices_.clear(); test_no_video_ = true; }
     }
-    audio_devices_ = AudioCapture::enumerate_devices();
+    audio_devices_ = driver_call(window_, [] { return AudioCapture::enumerate_devices(); });
     menu_bar_ = CreateMenu();
     device_menu_ = CreatePopupMenu();
     mode_menu_ = CreatePopupMenu();
@@ -399,8 +401,8 @@ void App::refresh_capture_devices()
     try {
         // Enumerate both lists before committing either; never restart a live
         // capture or worker simply because the user refreshed the menus.
-        auto video = CaptureEngine::enumerate_devices();
-        auto audio = AudioCapture::enumerate_devices();
+        auto video = driver_call(window_, [] { return CaptureEngine::enumerate_devices(); });
+        auto audio = driver_call(window_, [] { return AudioCapture::enumerate_devices(); });
         const auto video_selected = remap_selected_device(devices_, video, active_device_,
             [](const auto& device) { return device.symbolic_link; });
         std::optional<size_t> audio_selected;
@@ -439,7 +441,7 @@ void App::start_audio_capture(size_t index, bool reconnecting)
         audio_recovery_error_.clear();
     }
     const uint64_t generation = ++audio_generation_;
-    audio_capture_->stop();
+    driver_call(window_, [&] { audio_capture_->stop(); });
     if (active_audio_device_) CheckMenuItem(audio_menu_, audio_command_base + static_cast<UINT>(*active_audio_device_), MF_BYCOMMAND | MF_UNCHECKED);
     active_audio_device_.reset();
     CheckMenuItem(audio_menu_, audio_off_command, MF_BYCOMMAND | (index >= audio_devices_.size() ? MF_CHECKED : MF_UNCHECKED));
@@ -450,10 +452,10 @@ void App::start_audio_capture(size_t index, bool reconnecting)
     reconnect_audio_name_ = audio_devices_[index].name;
     last_audio_retry_ms_ = GetTickCount64();
     try {
-    audio_capture_->start(audio_devices_[index], [this, generation](std::wstring error) {
+    driver_call(window_, [&] { audio_capture_->start(audio_devices_[index], [this, generation](std::wstring error) {
         auto* text = new std::wstring(std::move(error));
         if (!PostMessageW(window_, audio_failed_message, static_cast<WPARAM>(generation), reinterpret_cast<LPARAM>(text))) delete text;
-    });
+    }); });
     audio_recovery_error_.clear();
     } catch (const std::exception& error) {
         audio_failed_ = true;
@@ -472,9 +474,9 @@ void App::ensure_audio_health()
     last_audio_retry_ms_ = now;
     ++audio_recovery_attempts_;
     ++audio_generation_;
-    audio_capture_->stop();
+    driver_call(window_, [&] { audio_capture_->stop(); });
     try {
-        auto discovered = AudioCapture::enumerate_devices();
+        auto discovered = driver_call(window_, [] { return AudioCapture::enumerate_devices(); });
         const size_t index = audio_restore_index(discovered, reconnect_audio_id_, reconnect_audio_name_);
         audio_devices_ = std::move(discovered);
         active_audio_device_.reset();
@@ -640,14 +642,14 @@ void App::start_capture_device(size_t index)
     capture_expected_ = false;
     worker_expected_ = false;
     ++capture_generation_;
-    capture_->stop();
+    driver_call(window_, [&] { capture_->stop(); });
     stop_nr_worker();
     active_mode_.reset();
     modes_.clear();
     status_ = L"Reading modes: " + devices_[index].name;
     update_title();
     try {
-        modes_ = CaptureEngine::enumerate_modes(devices_[index]);
+        modes_ = driver_call(window_, [&] { return CaptureEngine::enumerate_modes(devices_[index]); });
         rebuild_mode_menu();
         if (modes_.empty())
             throw std::runtime_error("No RGB24/RGB32, NV12/P010, YUY2 or UYVY mode exposed");
@@ -740,7 +742,7 @@ void App::start_capture_frame_rate(size_t index)
     if (!reconnecting_capture_) capture_expected_ = false;
     capture_failed_ = false;
     worker_expected_ = false;
-    capture_->stop();
+    driver_call(window_, [&] { capture_->stop(); });
     stop_nr_worker();
     {
         std::scoped_lock lock(frame_mutex_);
@@ -759,7 +761,7 @@ void App::start_capture_frame_rate(size_t index)
     try {
         capture_started_ms_ = last_capture_retry_ms_ = GetTickCount64();
         last_capture_frame_ms_.store(0);
-        capture_->start(devices_[*active_device_], modes_[index],
+        driver_call(window_, [&] { capture_->start(devices_[*active_device_], modes_[index],
             [this, generation](VideoFrame&& frame) {
                 if (generation == capture_generation_.load()) enqueue_frame(std::move(frame));
             },
@@ -767,7 +769,7 @@ void App::start_capture_frame_rate(size_t index)
                 auto* message = new std::wstring(std::move(error));
                 if (!PostMessageW(window_, capture_failed_message, static_cast<WPARAM>(generation), reinterpret_cast<LPARAM>(message)))
                     delete message;
-            });
+            }); });
         capture_expected_ = true;
         reconnect_mode_ = modes_[index];
         reconnect_device_link_ = devices_[*active_device_].symbolic_link;
@@ -806,7 +808,7 @@ void App::set_motion_analysis(bool enabled)
 {
     if (motion_analysis_enabled_ == enabled) return;
     const std::optional<size_t> mode = active_mode_;
-    capture_->stop();
+    driver_call(window_, [&] { capture_->stop(); });
     processor_ = enabled ? create_motion_analysis_processor() : create_passthrough_processor();
     motion_analysis_enabled_ = enabled;
     processor_->set_debug_overlay(history_overlay_enabled_);
@@ -879,13 +881,13 @@ void App::ensure_capture_health()
     last_capture_retry_ms_ = now;
     ++capture_recovery_attempts_;
     ++capture_generation_; // Ignore queued errors/frames belonging to the old session.
-    capture_->stop();
+    driver_call(window_, [&] { capture_->stop(); });
     worker_expected_ = false;
     stop_nr_worker();
     status_ = L"Waiting to reconnect capture device";
     try {
         if (test_no_video_) throw std::runtime_error("No capture device found (isolated test)");
-        const auto discovered = CaptureEngine::enumerate_devices();
+        const auto discovered = driver_call(window_, [] { return CaptureEngine::enumerate_devices(); });
         if (reconnect_device_link_.empty()) {
             const auto matches = std::count_if(discovered.begin(), discovered.end(), [&](const auto& value) {
                 return value.name == saved_device_name_;
@@ -898,7 +900,7 @@ void App::ensure_capture_health()
             return value.symbolic_link == reconnect_device_link_;
         });
         if (device == discovered.end()) throw std::runtime_error("Selected device is not connected");
-        auto available = CaptureEngine::enumerate_modes(*device);
+        auto available = driver_call(window_, [&] { return CaptureEngine::enumerate_modes(*device); });
         const auto wanted = *reconnect_mode_;
         const auto mode = std::find_if(available.begin(), available.end(), [&](const auto& value) {
             return value.supported && (wanted.subtype == GUID_NULL ? value.format_name == wanted.format_name : value.subtype == wanted.subtype) && value.width == wanted.width &&
@@ -1249,6 +1251,11 @@ LRESULT CALLBACK App::combo_proc(HWND window, UINT message, WPARAM wparam, LPARA
 }
 LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 {
+    if (driver_call_active) {
+        if (message == WM_CLOSE || (message == WM_SYSCOMMAND && (wparam & 0xfff0) == SC_CLOSE))
+            TerminateProcess(GetCurrentProcess(), 0);
+        if (message == WM_COMMAND || message == WM_TIMER || message == WM_MOUSEWHEEL) return 0;
+    }
     switch (message) {
     case WM_TIMER:
         if (wparam == health_timer_id) {
@@ -1329,6 +1336,9 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             reconnect_audio_name_ = L"Regression missing audio";
             last_audio_retry_ms_ = 0;
         }
+        return 0;
+    case test_driver_stall_message:
+        if (isolated_test_settings_) driver_call(window_, [] { Sleep(15000); });
         return 0;
     case WM_MOUSEWHEEL: {
         POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
