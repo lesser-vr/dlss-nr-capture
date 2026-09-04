@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          lfs: true
+      - name: Validate version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_NAME -notmatch '^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$') { throw 'Invalid release tag' }
+          if (-not (Test-Path "docs/releases/$env:GITHUB_REF_NAME.md")) { throw 'Release notes missing' }
+      - name: Configure
+        run: cmake -S . -B build -G "Visual Studio 18 2026" -A x64
+      - name: Build and run regression suite
+        run: cmake --build build --config Release --target regression --parallel
+      - name: Package and checksum
+        shell: pwsh
+        run: |
+          $name = "dlss-nr-capture-$env:GITHUB_REF_NAME-windows-x64"
+          ./tools/package.ps1 -ReleaseDir ./build/Release -OutputDir "./build/$name"
+          if ($LASTEXITCODE) { throw 'Packaging failed' }
+          $hash = (Get-FileHash "./build/$name.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $name.zip" | Set-Content "./build/$name.zip.sha256" -Encoding ascii
+          "RELEASE_NAME=$name" >> $env:GITHUB_ENV
+      - name: Upload release draft
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $releaseArgs = @('release', 'create', $env:GITHUB_REF_NAME, '--verify-tag', '--draft',
+            '--title', "DLSS NR Capture $env:GITHUB_REF_NAME",
+            '--notes-file', "docs/releases/$env:GITHUB_REF_NAME.md",
+            "build/$env:RELEASE_NAME.zip", "build/$env:RELEASE_NAME.zip.sha256")
+          if ($env:GITHUB_REF_NAME.Contains('-')) { $releaseArgs += '--prerelease' }
+          & gh @releaseArgs
+          if ($LASTEXITCODE) { throw 'Release draft creation failed; existing releases are never overwritten' }
