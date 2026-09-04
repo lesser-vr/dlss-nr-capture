@@ -109,6 +109,7 @@ std::wstring CaptureMode::display_name() const
 
 std::vector<CaptureMode> CaptureEngine::enumerate_modes(const CaptureDevice& device)
 {
+    if (!device.activation) throw std::runtime_error("Capture device is not available");
     ComPtr<IMFMediaSource> source;
     throw_if_failed(device.activation->ActivateObject(IID_PPV_ARGS(&source)),
                     "Activate capture device for mode enumeration");

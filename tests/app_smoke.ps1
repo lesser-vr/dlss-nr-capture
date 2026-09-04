@@ -125,10 +125,10 @@ try {
   $view = [RegressionUi]::GetSubMenu($menu,$labels.IndexOf('View'))
   for ($i=0; $i -lt 30; $i++) {
     $script:app.Refresh()
-    if ($script:app.MainWindowTitle -match 'No capture device found.*Audio reconnect pending:') { break }
+    if ($script:app.MainWindowTitle -match '(No capture device found|Capture reconnect pending).*Audio reconnect pending:') { break }
     Start-Sleep -Milliseconds 100
   }
-  if ($script:app.MainWindowTitle -notmatch 'No capture device found.*Audio reconnect pending:') {
+  if ($script:app.MainWindowTitle -notmatch '(No capture device found|Capture reconnect pending).*Audio reconnect pending:') {
     throw 'Missing audio preference was not restored without a video device'
   }
   Assert-MenuCommand $audioMenu 48000 $false
@@ -137,6 +137,9 @@ try {
   }
   [void][RegressionUi]::SendMessage($window,0x111,[IntPtr]49004,[IntPtr]::Zero)
   $restoredAudio = Get-ItemProperty -LiteralPath $keyPs
+  foreach ($field in @('VideoDevice','VideoDeviceId','VideoFormat','Width','Height','FpsNumerator','FpsDenominator','FlipVertical')) {
+    if ($beforeRefresh.$field -ne $restoredAudio.$field) { throw "Missing video startup erased preference: $field" }
+  }
   if ($restoredAudio.AudioDevice -ne 'Regression missing audio' -or
       $restoredAudio.AudioDeviceId -ne 'DLSS-NR-REGRESSION-NONEXISTENT-ENDPOINT') {
     throw 'Startup or unrelated save erased the missing audio identity'

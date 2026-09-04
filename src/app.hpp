@@ -103,6 +103,8 @@ private:
     FrameRateMeter capture_rate_, present_rate_, worker_rate_;
     WINDOWPLACEMENT windowed_placement_{sizeof(WINDOWPLACEMENT)};
     std::wstring saved_device_name_;
+    std::wstring saved_device_id_;
+    bool test_no_video_{};
     std::wstring saved_format_;
     std::wstring saved_audio_name_;
     uint32_t saved_width_{};

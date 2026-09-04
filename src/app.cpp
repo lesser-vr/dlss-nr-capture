@@ -195,6 +195,7 @@ void App::load_settings()
         return RegGetValueW(key, nullptr, name, RRF_RT_REG_DWORD, nullptr, &value, &bytes) == ERROR_SUCCESS;
     };
     saved_device_name_ = read_string(L"VideoDevice");
+    saved_device_id_ = read_string(L"VideoDeviceId");
     saved_format_ = read_string(L"VideoFormat");
     saved_audio_name_ = read_string(L"AudioDevice");
     reconnect_audio_id_ = read_string(L"AudioDeviceId");
@@ -232,11 +233,12 @@ void App::save_settings()
     auto write_dword = [key](const wchar_t* name, uint32_t value) {
         RegSetValueExW(key, name, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&value), sizeof(value));
     };
-    write_string(L"VideoDevice", active_device_ ? devices_[*active_device_].name : L"");
+    write_string(L"VideoDevice", active_device_ ? devices_[*active_device_].name : (capture_expected_ ? saved_device_name_ : L""));
+    write_string(L"VideoDeviceId", active_device_ ? devices_[*active_device_].symbolic_link : (capture_expected_ ? reconnect_device_link_ : L""));
     write_string(L"AudioDevice", audio_expected_ ? reconnect_audio_name_ : L"");
     write_string(L"AudioDeviceId", audio_expected_ ? reconnect_audio_id_ : L"");
-    if (active_mode_) {
-        const auto& mode = modes_[*active_mode_];
+    if (active_mode_ || (capture_expected_ && reconnect_mode_)) {
+        const auto& mode = active_mode_ ? modes_[*active_mode_] : *reconnect_mode_;
         write_string(L"VideoFormat", mode.format_name);
         write_dword(L"Width", mode.width);
         write_dword(L"Height", mode.height);
@@ -262,7 +264,7 @@ void App::discover_capture_devices()
     if (isolated_test_settings_) {
         wchar_t value[2]{};
         if (GetEnvironmentVariableW(L"DLSS_NR_TEST_NO_VIDEO", value, 2) == 1 && value[0] == L'1')
-            devices_.clear();
+            { devices_.clear(); test_no_video_ = true; }
     }
     audio_devices_ = AudioCapture::enumerate_devices();
     menu_bar_ = CreateMenu();
@@ -346,6 +348,23 @@ void App::discover_capture_devices()
         }
     }
     restoring_settings_ = false;
+
+    if ((!saved_device_id_.empty() || !saved_device_name_.empty()) &&
+        saved_width_ && saved_height_ && saved_fps_numerator_ && saved_fps_denominator_ && !saved_format_.empty()) {
+        CaptureMode wanted{};
+        wanted.format_name = saved_format_;
+        wanted.width = saved_width_; wanted.height = saved_height_;
+        wanted.frame_rate_numerator = saved_fps_numerator_;
+        wanted.frame_rate_denominator = saved_fps_denominator_;
+        reconnect_mode_ = wanted;
+        reconnect_device_link_ = saved_device_id_;
+        capture_expected_ = capture_failed_ = true;
+        if (has_saved_flip_) set_vertical_flip(saved_flip_);
+        ensure_capture_health();
+        capture_recovery_attempts_ = 0; // Initial restoration is not a recovery.
+        update_title();
+        return;
+    }
 
     if (devices_.empty()) {
         status_ = L"No capture device found";
@@ -853,7 +872,7 @@ std::wstring App::nr_worker_status() const
 
 void App::ensure_capture_health()
 {
-    if (!capture_expected_ || !active_device_ || !reconnect_mode_) return;
+    if (!capture_expected_ || !reconnect_mode_) return;
     const uint64_t now = GetTickCount64();
     if (!capture_retry_due(now, capture_started_ms_, last_capture_frame_ms_.load(),
                            last_capture_retry_ms_, capture_failed_)) return;
@@ -865,8 +884,16 @@ void App::ensure_capture_health()
     stop_nr_worker();
     status_ = L"Waiting to reconnect capture device";
     try {
-        if (reconnect_device_link_.empty()) throw std::runtime_error("Device has no stable identity; select it manually");
+        if (test_no_video_) throw std::runtime_error("No capture device found (isolated test)");
         const auto discovered = CaptureEngine::enumerate_devices();
+        if (reconnect_device_link_.empty()) {
+            const auto matches = std::count_if(discovered.begin(), discovered.end(), [&](const auto& value) {
+                return value.name == saved_device_name_;
+            });
+            if (matches != 1) throw std::runtime_error("Saved video device is missing or ambiguous");
+            for (const auto& value : discovered)
+                if (value.name == saved_device_name_) reconnect_device_link_ = value.symbolic_link;
+        }
         const auto device = std::find_if(discovered.begin(), discovered.end(), [&](const auto& value) {
             return value.symbolic_link == reconnect_device_link_;
         });
@@ -874,13 +901,24 @@ void App::ensure_capture_health()
         auto available = CaptureEngine::enumerate_modes(*device);
         const auto wanted = *reconnect_mode_;
         const auto mode = std::find_if(available.begin(), available.end(), [&](const auto& value) {
-            return value.supported && value.subtype == wanted.subtype && value.width == wanted.width &&
+            return value.supported && (wanted.subtype == GUID_NULL ? value.format_name == wanted.format_name : value.subtype == wanted.subtype) && value.width == wanted.width &&
                 value.height == wanted.height && value.frame_rate_denominator && wanted.frame_rate_denominator &&
                 static_cast<uint64_t>(value.frame_rate_numerator) * wanted.frame_rate_denominator ==
                 static_cast<uint64_t>(wanted.frame_rate_numerator) * value.frame_rate_denominator;
         });
         const size_t index = static_cast<size_t>(mode - available.begin());
+        if (!active_device_) {
+            const auto existing = std::find_if(devices_.begin(), devices_.end(), [&](const auto& value) {
+                return value.symbolic_link == device->symbolic_link;
+            });
+            if (existing == devices_.end()) {
+                devices_.push_back(*device);
+                active_device_ = devices_.size() - 1;
+                AppendMenuW(device_menu_, MF_STRING, device_command_base + static_cast<UINT>(*active_device_), device->name.c_str());
+            } else active_device_ = static_cast<size_t>(existing - devices_.begin());
+        }
         devices_[*active_device_] = *device;
+        CheckMenuItem(device_menu_, device_command_base + static_cast<UINT>(*active_device_), MF_BYCOMMAND | MF_CHECKED);
         modes_ = std::move(available);
         active_mode_.reset();
         rebuild_mode_menu();
