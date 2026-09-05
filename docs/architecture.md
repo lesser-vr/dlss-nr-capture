@@ -12,7 +12,7 @@ pipeline.
 - Capture publishes at most one pending frame.
 - A newly captured frame replaces an unrendered older frame.
 - Rendering runs on the window thread for this milestone.
-- GPU processing runs in a dedicated worker with separate keyed-mutex input and output textures.
+- GPU processing runs in a dedicated worker with separate keyed-mutex input/output textures and a private processing texture. The input mutex also protects its matching analysis payload. Evaluation does not hold the output mutex; busy output drops a completed result without growing a queue. Protocol 8 pairs output sequence, timing and completion age with pixels and adds flow recovery diagnostics.
 - The worker publishes the completed NR frame and the renderer displays that temporally aligned result directly instead of adding an older residual to the newest live frame.
 - NR speed thresholds follow the selected rational capture FPS: activate below 90% of the frame budget after ceil(FPS/2) consecutive qualifying EMA samples; latch slow above 150% after ceil(FPS) slow samples. These are result counts, not wall-clock deadlines. At 60 FPS the tested 15/25 ms and 30/60 samples are unchanged. Invalid rates fall back to 60 FPS, and mode changes reset EMA/counters. During brief scheduling gaps the last completed NR frame may be repeated for up to 100 ms instead of flashing back to the live original.
 - The worker publishes per-frame input, optical-flow, GPU preparation/execution, and output timings for live bottleneck diagnosis.
@@ -48,10 +48,10 @@ vector. A global or multi-plane camera model is used to validate and regularize
 the observed flow. Forward/backward disagreement, disocclusion, scene cuts and
 low-confidence regions reject temporal history.
 
-## Remaining GPU work (not current guarantees)
+## GPU capture and remaining work
 
-- Capture remains GPU-native from Media Foundation to D3D12.
-- No CPU pixel round-trip in the steady state.
+- Opt-in GPU-native capture accepts Media Foundation DXGI samples and converts into three bounded leased BGRA surfaces. A small analysis image is read back; unsupported modes, flip and debug overlay retain CPU conversion. See [current validation](gpu-capture-pipeline.md).
+- Complete removal of CPU analysis readback and broad driver/colorimetry coverage remain future work.
 - Forward and backward flow plus global-flow metadata are visualizable.
 - Scene cuts reset all temporal hints.
 - Processing timeout falls back to the newest unprocessed frame.

@@ -19,10 +19,17 @@ needed the existing bounded post-report cleanup for stalled runtime shutdown.
 
 ## Post-beta follow-up
 
+Update 2026-09-05: GPU-native capture is now an opt-in saved menu option and
+the worker uses bounded input/processing/output buffers with paired metadata.
+The earlier deferred statements above describe the prior batch, not the current
+implementation. Flow-default decision, eight-suite coverage and limitations:
+[GPU capture pipeline](gpu-capture-pipeline.md).
+
 - NR shutdown: paired snippet shutdown and explicit global GPU resource cleanup
   added; repeated actual NR runs now exit without forced cleanup.
-- GPU optimization phase 2: opt-in GPU-only coarse-flow handoff implemented and
-  measured. Default OFF; this is not GPU-native capture or multi-buffering.
+- GPU optimization phase 2: coarse-flow handoff measured, CPU-transfer recovery
+  implemented and fault-tested. Default ON for new CMake builds; this is separate
+  from the still-opt-in GPU-native capture path.
 - Long-session blackout: not reproduced; added sparse source/output probes and
   presentation-error logging to distinguish candidate causes without hiding frames.
 - Details and measured results: [investigation](shutdown-gpu-blackout.md).

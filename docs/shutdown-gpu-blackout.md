@@ -1,5 +1,10 @@
 # Shutdown, GPU flow, and blackout investigation
 
+Historical investigation below. The subsequent default-ON flow decision, CPU
+handoff recovery and eight-suite coverage are recorded in
+[GPU capture pipeline](gpu-capture-pipeline.md). Earlier default/verification
+statements in this investigation describe their original revision.
+
 ## Shutdown
 
 The local reproduction stalled at FreeLibrary during teardown, after feature,

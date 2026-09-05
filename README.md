@@ -343,3 +343,40 @@ temporal ON/OFF로 반복 실행하고 강제 종료가 필요하면 실패합�
 재현 시 발생 시각, 소리 지속 여부, 메뉴/오버레이 표시 여부, F10 전환 결과를 함께
 확인하세요. GPU 직접 모션 벡터 전송 실험과 측정 결과는
 [종료·GPU·암전 조사](docs/shutdown-gpu-blackout.md)에 정리했습니다.
+
+## GPU 직접 캡쳐 (실험 옵션)
+
+Processing > GPU-native capture (experimental)에서 켜고 끌 수 있으며 선택을
+저장합니다. 기본 OFF입니다. 지원되는 GPU 표면은 전체 영상을 CPU로 복사하지 않고
+처리하며, 모션 분석용 작은 영상만 읽습니다. 미지원 포맷·상하 반전·history overlay는
+기존 CPU 경로를 사용합니다. 제목의 capture GPU/CPU로 실제 경로를 확인할 수 있습니다.
+SDR BT.709 기준이며 HDR 처리는 아닙니다. 변경 시 캡쳐를 다시 연결합니다.
+
+워커는 입력·처리·출력 버퍼를 분리하고 픽셀과 분석 정보를 함께 전달합니다.
+화면 표시가 지연되면 결과를 무한히 쌓지 않습니다. 회귀 테스트는 8개로 확대했습니다.
+GPU flow 기본 적용 판단, 측정값 및 남은 검증은
+[GPU 캡쳐·버퍼 검증](docs/gpu-capture-pipeline.md)을 참고하세요.
+
+GPU flow는 별도의 무거운 AI 모델을 추가하는 기능이 아니라, 기존 GPU optical flow
+결과를 CPU로 읽었다가 다시 GPU로 올리는 전송을 줄이는 최적화입니다. GPU 내부 복사·
+동기화와 공유 메모리 비용은 남으며, 주된 GPU 부담은 NR 추론입니다. RTX 5090에서는
+평균 NR 처리 시간이 약 6.92ms에서 6.09ms로 줄었습니다. GPU 공유 생성·복사·시간 초과
+실패 시 NR을 유지하는 CPU 벡터 전송 복구를 추가하고, 새 빌드의 GPU flow 기본값을 ON으로
+변경했습니다. 기존 CMake 캐시에서 OFF로 설정했다면 ON으로 다시 설정해야 합니다.
+GPU 자체의 멈춤/제거까지 복구를 보장하지는 않으며 기존 워커 보호가 유지됩니다.
+GPU-native capture 옵션은 별개이며 기본 OFF를 유지합니다.
+
+제목과 View > Copy diagnostics to clipboard에서 실제 캡쳐 경로, CPU 우회 이유,
+flow 전송 경로와 원래 오류 코드를 확인할 수 있습니다. 바이너리는 ABI 5/프로토콜 8로
+함께 갱신해야 하며 이전 버전 DLL을 섞어 사용하지 마세요.
+
+동일 게임 영상 비교는 `tools/benchmark.ps1 -GpuCapture -CaptureOutput`으로 GPU
+BGRA 변환·축소 분석 경로를 재생한 뒤 기존 화질 비교 도구를 사용합니다. 실제 캡쳐카드의
+디코딩이나 HDMI 지연을 측정하는 모드는 아닙니다. 오류 복구 재검증은
+`tests/flow_recovery.ps1 -ReleaseDir <경로> -OutputDir <새 경로>`를 사용하며,
+`-InputVideo`를 생략하면 합성 영상으로 검사합니다. 실제 NVIDIA GPU와 개인 NR DLL이 필요합니다.
+
+GPU 직접 캡쳐는 추가 실장치 검사에서 NV12 1440p60·4K60, P010 1440p60·4K30의
+NR 연동과 정상 종료를 확인했습니다. 각 30초 검사이며 장시간 플레이/주관적 화질을
+보장하지 않습니다. 장시간 검사 자동화의 권장 구성과 현재 도구의 한계는
+[장시간 플레이 자동 검증 검토](docs/long-play-validation.md)에 정리했습니다.
