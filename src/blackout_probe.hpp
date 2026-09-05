@@ -27,9 +27,11 @@ public:
     }
     void submit(ID3D11Device* device, ID3D11DeviceContext* context, ID3D11Texture2D* output,
                 const uint8_t* source, size_t bytes, UINT width, UINT height,
-                bool nr_active, uint64_t now) {
+                bool nr_active, uint64_t now, UINT source_width = 0, UINT source_height = 0) {
+        if (!source_width) source_width = width;
+        if (!source_height) source_height = height;
         if (pending_ || (submitted_ && now - submitted_ < 1000) || !source ||
-            !width || !height || bytes < static_cast<size_t>(width) * height * 4) return;
+            !width || !height || bytes < static_cast<size_t>(source_width) * source_height * 4) return;
         if (!staging_) {
             D3D11_TEXTURE2D_DESC desc{};
             desc.Width = 9; desc.Height = 1; desc.MipLevels = desc.ArraySize = 1;
@@ -42,7 +44,8 @@ public:
         source_dark_ = true; nr_active_ = nr_active;
         for (UINT y = 0; y < 3; ++y) for (UINT x = 0; x < 3; ++x) {
             const UINT sx = width * (2 * x + 1) / 6, sy = height * (2 * y + 1) / 6;
-            const auto* pixel = source + (static_cast<size_t>(sy) * width + sx) * 4;
+            const UINT px = source_width * (2 * x + 1) / 6, py = source_height * (2 * y + 1) / 6;
+            const auto* pixel = source + (static_cast<size_t>(py) * source_width + px) * 4;
             for (UINT c = 0; c < 3; ++c) source_dark_ &= pixel[c] <= 8;
             const D3D11_BOX box{sx, sy, 0, sx + 1, sy + 1, 1};
             context->CopySubresourceRegion(staging_.Get(), 0, y * 3 + x, 0, 0, output, 0, &box);

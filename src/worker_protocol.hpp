@@ -3,7 +3,7 @@
 #include <cstdint>
 
 constexpr uint32_t nr_worker_protocol_magic = 0x4E525743; // NRWC
-constexpr uint32_t nr_worker_protocol_version = 6;
+constexpr uint32_t nr_worker_protocol_version = 8;
 constexpr uint32_t nr_worker_max_mask_tiles = 256;
 
 enum TemporalFlags : uint32_t {
@@ -37,6 +37,14 @@ struct WorkerTemporalState {
     volatile LONG sequence{};
     volatile LONG64 worker_heartbeat_ms{};
     volatile LONG64 worker_processed_frames{};
+    volatile LONG flow_mode{};
+    volatile LONG flow_error{};
+    volatile LONG64 worker_published_frames{};
+    volatile LONG64 worker_dropped_outputs{};
+    // Protected by the output texture's keyed mutex, unlike live timing counters.
+    uint64_t output_frame_sequence{};
+    uint64_t output_processing_us{};
+    uint64_t output_completed_ms{};
     volatile LONG64 nr_total_us{};
     volatile LONG64 nr_input_us{};
     volatile LONG64 nr_setup_us{};

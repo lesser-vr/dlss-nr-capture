@@ -35,15 +35,19 @@ public:
     {
         constexpr uint32_t analysis_width = 96;
         constexpr int tile_size = 8;
+        const uint32_t pixel_width = frame.gpu ? 96 : frame.width;
+        const uint32_t pixel_height = frame.gpu ? frame.analysis_height : frame.height;
+        if (!pixel_width || !pixel_height || frame.bgra.size() < static_cast<size_t>(pixel_width) * pixel_height * 4)
+            return false;
         const uint32_t width = std::min(analysis_width, frame.width);
         const uint32_t height = std::max(1u, static_cast<uint32_t>(
             std::lround(static_cast<double>(frame.height) * width / std::max(1u, frame.width))));
         std::vector<uint8_t> current(static_cast<size_t>(width) * height);
         for (uint32_t y = 0; y < height; ++y) {
-            const uint32_t sy = std::min(frame.height - 1, y * frame.height / height);
+            const uint32_t sy = std::min(pixel_height - 1, y * pixel_height / height);
             for (uint32_t x = 0; x < width; ++x) {
-                const uint32_t sx = std::min(frame.width - 1, x * frame.width / width);
-                const uint8_t* p = frame.bgra.data() + (static_cast<size_t>(sy) * frame.width + sx) * 4;
+                const uint32_t sx = std::min(pixel_width - 1, x * pixel_width / width);
+                const uint8_t* p = frame.bgra.data() + (static_cast<size_t>(sy) * pixel_width + sx) * 4;
                 current[static_cast<size_t>(y) * width + x] =
                     static_cast<uint8_t>((29 * p[0] + 150 * p[1] + 77 * p[2]) >> 8);
             }
@@ -157,7 +161,7 @@ public:
                         std::min(rejected.size(), static_cast<size_t>(nr_worker_max_mask_tiles)));
         }
 
-        if (debug_overlay_.load()) {
+        if (debug_overlay_.load() && !frame.gpu) {
             for (uint32_t y = 0; y < frame.height; ++y) for (uint32_t x = 0; x < frame.width; ++x) {
                 const int ax = std::min<int>(width - 1, x * width / frame.width);
                 const int ay = std::min<int>(height - 1, y * height / frame.height);

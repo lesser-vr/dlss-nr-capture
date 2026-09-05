@@ -143,6 +143,12 @@ int wmain(int argc, wchar_t** argv)
 
     D3D11_TEXTURE2D_DESC description{};
     output_texture->GetDesc(&description);
+    auto processing_desc = description;
+    processing_desc.MiscFlags = 0;
+    ComPtr<ID3D11Texture2D> processing_texture;
+    if (FAILED(device->CreateTexture2D(&processing_desc, nullptr, &processing_texture))) {
+        UnmapViewOfFile(temporal); CloseHandle(parent); return 8;
+    }
     LONG adapter_error = 0;
     const bool nr_enabled = InterlockedCompareExchange(&temporal->nr_enabled, 0, 0) != 0;
     std::unique_ptr<INrAdapter> adapter;
@@ -171,31 +177,23 @@ int wmain(int argc, wchar_t** argv)
         InterlockedExchange64(&temporal->worker_heartbeat_ms, static_cast<LONG64>(GetTickCount64()));
         const HRESULT acquired = input_mutex->AcquireSync(1, 100);
         if (acquired == S_OK) {
-            const HRESULT output_acquired = output_mutex->AcquireSync(0, 100);
-            if (output_acquired == S_OK) context->CopyResource(output_texture.Get(), input_texture.Get());
+            context->CopyResource(processing_texture.Get(), input_texture.Get());
+            TemporalAnalysisPayload payload = temporal->payload;
+            MemoryBarrier();
             input_mutex->ReleaseSync(0);
-            if (output_acquired != S_OK) continue;
             bool output_completed = false;
-            TemporalAnalysisPayload payload{};
-            LONG before{}, after{};
-            do {
-                before = InterlockedCompareExchange(&temporal->sequence, 0, 0);
-                if (before & 1) { Sleep(0); continue; }
-                MemoryBarrier();
-                std::memcpy(&payload, &temporal->payload, sizeof(payload));
-                MemoryBarrier();
-                after = InterlockedCompareExchange(&temporal->sequence, 0, 0);
-            } while (before != after || (after & 1));
             payload.nr_style = static_cast<uint16_t>(InterlockedCompareExchange(&temporal->nr_style, 0, 0));
             payload.nr_preset = static_cast<uint16_t>(InterlockedCompareExchange(&temporal->nr_preset, 0, 0));
             payload.nr_intensity_percent = static_cast<uint16_t>(InterlockedCompareExchange(&temporal->nr_intensity_percent, 0, 0));
             payload.nr_temporal = InterlockedCompareExchange(&temporal->nr_temporal, 0, 0) != 0;
             payload.nr_automask = 1;
             if (worker_frame_eligible(payload, last_sequence)) {
-                if (adapter->process(context.Get(), output_texture.Get(), payload)) {
+                if (adapter->process(context.Get(), processing_texture.Get(), payload)) {
                     consecutive_failures = 0;
                     last_sequence = payload.frame_sequence;
                     const NrTimingSnapshot timing = adapter->timings();
+                    InterlockedExchange(&temporal->flow_mode,static_cast<LONG>(timing.flow_mode));
+                    InterlockedExchange(&temporal->flow_error,static_cast<LONG>(timing.flow_error));
                     InterlockedExchange64(&temporal->nr_total_us, static_cast<LONG64>(timing.total_us));
                     InterlockedExchange64(&temporal->nr_input_us, static_cast<LONG64>(timing.input_us));
                     InterlockedExchange64(&temporal->nr_setup_us, static_cast<LONG64>(timing.setup_us));
@@ -214,14 +212,23 @@ int wmain(int argc, wchar_t** argv)
                     adapter->initialize(device.Get(), description);
                     InterlockedExchange(&temporal->worker_adapter_state, adapter->state_code());
                     InterlockedExchange(&temporal->worker_adapter_error, 5);
+                    InterlockedExchange(&temporal->flow_mode, 0);
                     wcsncpy_s(temporal->worker_adapter_name, adapter->name(), _TRUNCATE);
                     wcsncpy_s(temporal->worker_adapter_error_message, adapter_error_message.c_str(), _TRUNCATE);
                     consecutive_failures = 0;
                 }
             }
-            // Key 1 publishes a completed result. Skipped/failed input must
-            // return key 0 to the producer, not masquerade as new NR output.
-            output_mutex->ReleaseSync(worker_output_release_key(output_completed));
+            // Never wait for presentation: keep one completed output and drop
+            // a newer result when the consumer is busy, without growing a queue.
+            if (output_completed && output_mutex->AcquireSync(0, 0) == S_OK) {
+                context->CopyResource(output_texture.Get(), processing_texture.Get());
+                temporal->output_frame_sequence = payload.frame_sequence;
+                temporal->output_processing_us = adapter->timings().total_us;
+                temporal->output_completed_ms = GetTickCount64();
+                InterlockedIncrement64(&temporal->worker_published_frames);
+                MemoryBarrier();
+                output_mutex->ReleaseSync(1);
+            } else if (output_completed) InterlockedIncrement64(&temporal->worker_dropped_outputs);
         }
     }
     InterlockedExchange(&temporal->worker_adapter_state, 0);

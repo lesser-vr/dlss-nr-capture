@@ -90,7 +90,7 @@ bool __stdcall initialize(ID3D11Device* supplied_device, const D3D11_TEXTURE2D_D
     bridge_create_correction_target = reinterpret_cast<BridgeCreateCorrectionTarget>(
         GetProcAddress(bridge_module, "dlss5nr_create_correction_target"));
     bridge_shutdown = reinterpret_cast<BridgeShutdown>(GetProcAddress(bridge_module, "dlss5nr_shutdown"));
-    bridge_get_timings = reinterpret_cast<BridgeGetTimings>(GetProcAddress(bridge_module, "dlss5nr_get_timings"));
+    bridge_get_timings = reinterpret_cast<BridgeGetTimings>(GetProcAddress(bridge_module, "dlss5nr_get_timings_v2"));
     if (!bridge_init || !bridge_create_correction_target || !bridge_process ||
         !bridge_shutdown || !bridge_get_timings) {
         last_error_message = L"Required dlss5nr_bridge exports are missing";

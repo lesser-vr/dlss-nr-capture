@@ -45,6 +45,7 @@ constexpr UINT prevent_sleep_command = 49006;
 constexpr UINT passthrough_command = 50000;
 constexpr UINT motion_analysis_command = 50001;
 constexpr UINT history_overlay_command = 50002;
+constexpr UINT gpu_capture_command = 50003;
 constexpr UINT nr_enable_command = 51000;
 constexpr UINT nr_temporal_command = 51001;
 constexpr UINT nr_style_base = 51100;
@@ -136,8 +137,13 @@ int App::run(HINSTANCE instance, int show_command)
         SetWindowLongPtrW(mode_combo_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(combo_proc)));
 
     renderer_.initialize(window_);
+    capture_->set_gpu_device(renderer_.device());
     renderer_.clear();
     load_settings();
+    wchar_t gpu_capture[2]{};
+    if (GetEnvironmentVariableW(L"DLSS_NR_GPU_CAPTURE", gpu_capture, 2) == 1)
+        gpu_capture_enabled_ = gpu_capture[0] == L'1';
+    capture_->set_gpu_requested(gpu_capture_enabled_);
     // Only isolated regression settings may enable frame suppression.
     if (settings_key_path().rfind(L"Software\\DlssNrCapture\\Tests\\", 0) == 0) {
         isolated_test_settings_ = true;
@@ -239,6 +245,7 @@ void App::load_settings()
     if (read_dword(L"PreventCaptureSleep", value)) prevent_capture_sleep_ = value != 0;
     if (read_dword(L"AutoSizeToResolution", value)) auto_size_to_resolution_ = value != 0;
     if (read_dword(L"PerformanceOverlay", value)) performance_overlay_ = value != 0;
+    if (read_dword(L"GpuNativeCapture", value)) gpu_capture_enabled_ = value != 0;
     RegCloseKey(key);
 }
 
@@ -269,6 +276,7 @@ void App::save_settings()
     }
     write_dword(L"FlipVertical", flip_vertical_.load(std::memory_order_relaxed) ? 1u : 0u);
     write_dword(L"NrEnabled", nr_enabled_ ? 1u : 0u);
+    write_dword(L"GpuNativeCapture", gpu_capture_enabled_ ? 1u : 0u);
     write_dword(L"NrTemporal", nr_temporal_enabled_ ? 1u : 0u);
     write_dword(L"NrStyle", nr_style_);
     write_dword(L"NrPreset", nr_preset_);
@@ -332,6 +340,8 @@ void App::discover_capture_devices()
     AppendMenuW(processing_menu_, MF_STRING | MF_CHECKED, motion_analysis_command, L"Motion analysis");
     AppendMenuW(processing_menu_, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(processing_menu_, MF_STRING, history_overlay_command, L"Show rejected history");
+    AppendMenuW(processing_menu_, MF_STRING | (gpu_capture_enabled_ ? MF_CHECKED : 0),
+        gpu_capture_command, L"GPU-native capture (experimental)");
     AppendMenuW(view_menu_, MF_STRING, fullscreen_command, L"Full screen (F11)");
     AppendMenuW(view_menu_, MF_STRING | (always_on_top_ ? MF_CHECKED : 0), always_on_top_command, L"Always on top");
     AppendMenuW(view_menu_, MF_STRING | (prevent_capture_sleep_ ? MF_CHECKED : 0),
@@ -579,6 +589,7 @@ bool App::handle_mode_wheel(WPARAM wparam)
 void App::set_vertical_flip(bool enabled)
 {
     flip_vertical_.store(enabled, std::memory_order_relaxed);
+    capture_->set_gpu_allowed(!enabled && !history_overlay_enabled_);
     CheckMenuItem(image_menu_, flip_vertical_command,
                   MF_BYCOMMAND | (enabled ? MF_CHECKED : MF_UNCHECKED));
     save_settings();
@@ -879,6 +890,9 @@ std::wstring App::nr_worker_status() const
                 ? L"NR too slow - original only"
                 : (renderer_.worker_preparing() ? L"NR preparing" : L"original only"));
         std::wstring timing;
+        const LONG flow_mode=InterlockedCompareExchange(&temporal_state_->flow_mode,0,0);
+        const wchar_t* flow_path=flow_mode==1?L"GPU handoff":flow_mode==2?L"CPU handoff":
+            flow_mode==3?L"CPU handoff (GPU recovery)":L"inactive";
         if (adapter == 2 && frames) {
             const auto milliseconds = [](volatile LONG64* value) {
                 const uint64_t us = static_cast<uint64_t>(InterlockedCompareExchange64(value, 0, 0));
@@ -902,7 +916,7 @@ std::wstring App::nr_worker_status() const
                std::to_wstring(renderer_.worker_output_frames()) + L" corrections, " +
                std::to_wstring(renderer_.worker_enhanced_frames()) + L" enhanced, " +
                std::to_wstring(renderer_.worker_fallback_frames()) + L" original, " +
-               correction_state + timing + L"]";
+               correction_state + timing + L", flow path: " + flow_path + L"]";
     }
     if (worker_process_.hProcess) {
         DWORD code = STILL_ACTIVE;
@@ -1005,6 +1019,7 @@ void App::ensure_nr_worker_health()
 
 void App::stop_nr_worker()
 {
+    renderer_.set_temporal_state(nullptr);
     // Closing the last job handle also covers abrupt parent termination.
     worker_job_.reset();
     if (worker_process_.hProcess) {
@@ -1037,6 +1052,7 @@ void App::restart_nr_worker(uint32_t width, uint32_t height)
         MapViewOfFile(temporal_mapping_, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(WorkerTemporalState)));
     if (!temporal_state_) throw std::runtime_error("Map temporal metadata failed");
     *temporal_state_ = WorkerTemporalState{};
+    renderer_.set_temporal_state(temporal_state_);
     InterlockedExchange(&temporal_state_->nr_enabled, nr_enabled_ ? 1 : 0);
     InterlockedExchange(&temporal_state_->nr_style, static_cast<LONG>(nr_style_));
     InterlockedExchange(&temporal_state_->nr_preset, static_cast<LONG>(nr_preset_));
@@ -1110,6 +1126,7 @@ void App::set_nr_enabled(bool enabled)
 void App::set_history_overlay(bool enabled)
 {
     history_overlay_enabled_ = enabled;
+    capture_->set_gpu_allowed(!enabled && !flip_vertical_.load());
     processor_->set_debug_overlay(enabled);
     CheckMenuItem(processing_menu_, history_overlay_command,
                   MF_BYCOMMAND | (enabled ? MF_CHECKED : MF_UNCHECKED));
@@ -1119,6 +1136,7 @@ void App::enqueue_frame(VideoFrame&& frame)
 {
     last_capture_frame_ms_.store(GetTickCount64());
     if (suppress_test_frames_) return;
+    if (frame.gpu && flip_vertical_.load(std::memory_order_relaxed)) return;
     if (flip_vertical_.load(std::memory_order_relaxed) && frame.height > 1) {
         const size_t row_bytes = static_cast<size_t>(frame.width) * 4;
         for (uint32_t top = 0, bottom = frame.height - 1; top < bottom; ++top, --bottom)
@@ -1127,16 +1145,7 @@ void App::enqueue_frame(VideoFrame&& frame)
                              frame.bgra.begin() + static_cast<size_t>(bottom) * row_bytes);
     }
     if (!processor_->process(frame)) return;
-    {
-    std::scoped_lock temporal_lock(temporal_mutex_);
-    if (temporal_state_) {
-        const TemporalAnalysisPayload payload = processor_->temporal_state();
-        InterlockedIncrement(&temporal_state_->sequence);
-        temporal_state_->payload = payload;
-        MemoryBarrier();
-        InterlockedIncrement(&temporal_state_->sequence);
-    }
-    }
+    frame.temporal = processor_->temporal_state();
     received_frames_.fetch_add(1, std::memory_order_relaxed);
     {
         std::scoped_lock lock(frame_mutex_);
@@ -1152,6 +1161,8 @@ void App::update_title()
     const std::string details = processor_->diagnostics();
     if (!details.empty()) title += L" — " + widen(details);
     title += L" — " + nr_worker_status();
+    title += L" | capture GPU/CPU " + std::to_wstring(capture_->gpu_frames()) + L"/" + std::to_wstring(capture_->cpu_frames());
+    title += L" | " + std::wstring(capture_->path_status());
     if (capture_recovery_attempts_) title += L" | capture reconnects " + std::to_wstring(capture_recovery_attempts_);
     if (audio_expected_ && audio_failed_) title += L" | Audio reconnect pending: " + audio_recovery_error_;
     if (audio_recovery_attempts_) title += L" | audio reconnects " + std::to_wstring(audio_recovery_attempts_);
@@ -1200,6 +1211,17 @@ void App::copy_diagnostics()
     report.add(L"Intensity percent", nr_intensity_percent_);
     report.add(L"Worker wait ms", nr_wait_ms_);
     report.add(L"Received frames", received_frames_.load());
+    report.add(L"GPU capture requested", gpu_capture_enabled_ ? L"yes" : L"no");
+    report.add(L"Current capture path / fallback reason", capture_->path_status());
+    if (temporal_state_) {
+        report.add(L"Flow mode (0 inactive, 1 GPU, 2 CPU, 3 recovered CPU)",
+            static_cast<uint64_t>(InterlockedCompareExchange(&temporal_state_->flow_mode,0,0)));
+        std::wostringstream hr;
+        hr << L"0x" << std::hex << static_cast<uint32_t>(InterlockedCompareExchange(&temporal_state_->flow_error,0,0));
+        report.add(L"Original GPU flow fallback HRESULT", hr.str());
+    }
+    report.add(L"Capture GPU frames (session lifetime)", capture_->gpu_frames());
+    report.add(L"Capture CPU frames (session lifetime)", capture_->cpu_frames());
     report.add(L"Displayed frames", displayed_frames_);
     report.add(L"Measured capture FPS", std::to_wstring(capture_rate_.fps()));
     report.add(L"Measured present FPS", std::to_wstring(present_rate_.fps()));
@@ -1229,6 +1251,8 @@ void App::copy_diagnostics()
             report.add(label, static_cast<uint64_t>(InterlockedCompareExchange64(value, 0, 0)));
         };
         add(L"Worker processed frames", &temporal_state_->worker_processed_frames);
+        add(L"Worker published frames", &temporal_state_->worker_published_frames);
+        add(L"Worker dropped outputs", &temporal_state_->worker_dropped_outputs);
         add(L"NR total us", &temporal_state_->nr_total_us);
         add(L"Input us", &temporal_state_->nr_input_us);
         add(L"Setup us", &temporal_state_->nr_setup_us);
@@ -1414,6 +1438,16 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         if (command == passthrough_command) { set_motion_analysis(false); return 0; }
         if (command == motion_analysis_command) { set_motion_analysis(true); return 0; }
         if (command == history_overlay_command) { set_history_overlay(!history_overlay_enabled_); return 0; }
+        if (command == gpu_capture_command) {
+            gpu_capture_enabled_ = !gpu_capture_enabled_;
+            capture_->set_gpu_requested(gpu_capture_enabled_);
+            CheckMenuItem(processing_menu_, gpu_capture_command, MF_BYCOMMAND | (gpu_capture_enabled_ ? MF_CHECKED : MF_UNCHECKED));
+            const bool flip = flip_vertical_.load();
+            if (active_mode_) start_capture_mode(*active_mode_);
+            set_vertical_flip(flip);
+            save_settings();
+            return 0;
+        }
         if (command == nr_enable_command) { set_nr_enabled(!nr_enabled_); return 0; }
         if (command == nr_temporal_command) {
             nr_temporal_enabled_ = !nr_temporal_enabled_;

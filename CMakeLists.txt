@@ -56,7 +56,7 @@ add_library(dlss5nr-runtime-bridge SHARED
 )
 target_include_directories(dlss5nr-runtime-bridge PRIVATE third_party/comfyui_dlss5_nr src)
 option(DLSS_NR_EXPERIMENTAL_GPU_FENCE_INPUT "Use experimental GPU-queue input handoff" OFF)
-option(DLSS_NR_EXPERIMENTAL_GPU_FLOW "Keep coarse optical flow on the GPU" OFF)
+option(DLSS_NR_EXPERIMENTAL_GPU_FLOW "GPU coarse-flow handoff with automatic CPU-transfer recovery" ON)
 if(DLSS_NR_EXPERIMENTAL_GPU_FLOW)
     target_compile_definitions(dlss5nr-runtime-bridge PRIVATE DLSS_NR_EXPERIMENTAL_GPU_FLOW=1)
 endif()
@@ -103,6 +103,26 @@ target_compile_definitions(dlss-nr-benchmark PRIVATE UNICODE _UNICODE NOMINMAX W
 target_compile_options(dlss-nr-benchmark PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(dlss-nr-benchmark PRIVATE d3d11 dxgi mfplat mfreadwrite mfuuid ole32)
 if(BUILD_TESTING)
+    # Manual enumeration probe: never silently changes the mode under test.
+    add_executable(dlss-nr-capture-modes tests/capture_modes.cpp src/capture_engine.cpp)
+    target_include_directories(dlss-nr-capture-modes PRIVATE src)
+    target_compile_definitions(dlss-nr-capture-modes PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_options(dlss-nr-capture-modes PRIVATE /W4 /permissive- /EHsc /utf-8)
+    target_link_libraries(dlss-nr-capture-modes PRIVATE d3d11 mf mfplat mfreadwrite mfuuid ole32 windowscodecs)
+    add_executable(dlss-nr-worker-pipeline-test tests/worker_pipeline.cpp)
+    target_include_directories(dlss-nr-worker-pipeline-test PRIVATE src)
+    target_compile_definitions(dlss-nr-worker-pipeline-test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_options(dlss-nr-worker-pipeline-test PRIVATE /W4 /permissive- /EHsc /utf-8)
+    target_link_libraries(dlss-nr-worker-pipeline-test PRIVATE d3d11 dxgi)
+    add_test(NAME regression.worker-pipeline COMMAND dlss-nr-worker-pipeline-test $<TARGET_FILE:dlss-nr-worker>)
+    set_tests_properties(regression.worker-pipeline PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77)
+    add_executable(dlss-nr-gpu-capture-test tests/gpu_capture.cpp src/frame_processor.cpp)
+    target_include_directories(dlss-nr-gpu-capture-test PRIVATE src)
+    target_compile_definitions(dlss-nr-gpu-capture-test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_options(dlss-nr-gpu-capture-test PRIVATE /W4 /permissive- /EHsc /utf-8)
+    target_link_libraries(dlss-nr-gpu-capture-test PRIVATE d3d11 mfplat mfuuid)
+    add_test(NAME regression.gpu-capture COMMAND dlss-nr-gpu-capture-test)
+    set_tests_properties(regression.gpu-capture PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77)
     add_test(NAME regression.tools COMMAND powershell.exe -NoProfile -ExecutionPolicy Bypass
         -File "${CMAKE_SOURCE_DIR}/tests/tools_smoke.ps1" -SourceDir "${CMAKE_SOURCE_DIR}")
     set_tests_properties(regression.tools PROPERTIES TIMEOUT 30)
@@ -151,6 +171,6 @@ if(BUILD_TESTING)
         COMMAND "${CMAKE_CTEST_COMMAND}" -C $<CONFIG> --output-on-failure
         DEPENDS dlss-nr-capture dlss-nr-worker dlss-nr-adapter-sample
                 dlss-nr-adapter-bridge dlss5nr-runtime-bridge dlss5nr-caller-shim
-                dlss-nr-regression-core dlss-nr-gpu-input-test dlss-nr-benchmark dlss-nr-quality-compare
+                dlss-nr-regression-core dlss-nr-gpu-input-test dlss-nr-gpu-capture-test dlss-nr-worker-pipeline-test dlss-nr-benchmark dlss-nr-quality-compare
         USES_TERMINAL)
 endif()

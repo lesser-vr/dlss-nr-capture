@@ -48,6 +48,22 @@ public:
     void start(const CaptureDevice& device, const CaptureMode& mode,
                FrameCallback on_frame, ErrorCallback on_error);
     void stop();
+    void set_gpu_device(ID3D11Device* device) { gpu_device_ = device; }
+    void set_gpu_allowed(bool allowed) { gpu_allowed_.store(allowed); }
+    void set_gpu_requested(bool requested) { gpu_requested_.store(requested); }
+    uint64_t gpu_frames() const { return gpu_frames_.load(); }
+    uint64_t cpu_frames() const { return cpu_frames_.load(); }
+    const wchar_t* path_status() const {
+        switch (path_.load()) {
+        case 1: return L"GPU native";
+        case 2: return L"CPU: GPU capture disabled";
+        case 3: return L"CPU: flip or history overlay enabled";
+        case 4: return L"CPU: driver supplied system-memory sample";
+        case 5: return L"CPU: GPU conversion unavailable or buffers busy";
+        case 6: return L"CPU: native surface dimensions mismatch";
+        default: return L"waiting for capture sample";
+        }
+    }
 
     STDMETHODIMP QueryInterface(REFIID riid, void** object) override;
     STDMETHODIMP_(ULONG) AddRef() override;
@@ -58,6 +74,14 @@ public:
     STDMETHODIMP OnFlush(DWORD) override { return S_OK; }
 
 private:
+    ComPtr<ID3D11Device> gpu_device_;
+    std::atomic<bool> gpu_allowed_{true};
+    std::atomic<bool> gpu_requested_{};
+    std::atomic<uint64_t> gpu_frames_{}, cpu_frames_{};
+    std::atomic<unsigned> path_{};
+    ComPtr<IMFDXGIDeviceManager> gpu_manager_;
+    GpuCaptureConverter gpu_converter_;
+    std::mutex gpu_mutex_;
     enum class PixelFormat { bgra, bgr24, nv12, p010, yuy2, uyvy, mjpg };
     static constexpr DWORD video_stream = static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
     bool convert_to_bgra(PixelFormat format, const uint8_t* source, size_t length,

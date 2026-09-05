@@ -71,7 +71,7 @@ bool D3D11Renderer::worker_connected() const noexcept
 void D3D11Renderer::initialize(HWND window)
 {
     window_ = window;
-    UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+    UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
 #ifdef _DEBUG
     flags |= D3D11_CREATE_DEVICE_DEBUG;
 #endif
@@ -79,6 +79,8 @@ void D3D11Renderer::initialize(HWND window)
     throw_if_failed(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags,
                                       nullptr, 0, D3D11_SDK_VERSION, &device_, &level,
                                       &context_), "D3D11CreateDevice");
+    ComPtr<ID3D10Multithread> protection;
+    if (SUCCEEDED(device_.As(&protection))) protection->SetMultithreadProtected(TRUE);
     initialize_correction_pipeline();
     initialize_overlay_pipeline();
 
@@ -313,9 +315,8 @@ void D3D11Renderer::ensure_frame_texture(uint32_t width, uint32_t height)
     description.ArraySize = 1;
     description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     description.SampleDesc.Count = 1;
-    description.Usage = D3D11_USAGE_DYNAMIC;
+    description.Usage = D3D11_USAGE_DEFAULT;
     description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    description.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     throw_if_failed(device_->CreateTexture2D(&description, nullptr, &frame_texture_),
                     "Create frame texture");
     throw_if_failed(device_->CreateShaderResourceView(frame_texture_.Get(), nullptr, &frame_view_),
@@ -340,19 +341,16 @@ void D3D11Renderer::render(const VideoFrame& frame)
             last_blackout_state_ = state; last_probe_log_ms_ = tick;
         }
     }
-    D3D11_MAPPED_SUBRESOURCE mapped{};
-    throw_if_failed(context_->Map(frame_texture_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped),
-                    "Map frame texture");
-    const size_t source_pitch = static_cast<size_t>(frame.width) * 4;
-    for (uint32_t row = 0; row < frame.height; ++row) {
-        memcpy(static_cast<uint8_t*>(mapped.pData) + static_cast<size_t>(row) * mapped.RowPitch,
-               frame.bgra.data() + static_cast<size_t>(row) * source_pitch, source_pitch);
-    }
-    context_->Unmap(frame_texture_.Get(), 0);
+    if (frame.gpu) context_->CopyResource(frame_texture_.Get(), frame.gpu->texture.Get());
+    else context_->UpdateSubresource(frame_texture_.Get(), 0, nullptr, frame.bgra.data(), frame.width * 4, 0);
 
     if (shared_input_texture_ && shared_width_ == frame.width && shared_height_ == frame.height &&
         shared_input_mutex_->AcquireSync(0, 0) == S_OK) {
         context_->CopyResource(shared_input_texture_.Get(), frame_texture_.Get());
+        if (temporal_state_) {
+            temporal_state_->payload = frame.temporal;
+            MemoryBarrier();
+        }
         shared_input_mutex_->ReleaseSync(1);
     }
 
@@ -373,8 +371,8 @@ void D3D11Renderer::render(const VideoFrame& frame)
         if (correction_enabled_) {
             context_->CopyResource(correction_texture_.Get(), shared_output_texture_.Get());
             const uint64_t update_tick = GetTickCount64();
-            speed_monitor_.observe(update_tick, worker_processing_time_us_);
-            correction_updated_tick_ms_ = update_tick;
+            speed_monitor_.observe(update_tick, temporal_state_ ? temporal_state_->output_processing_us : worker_processing_time_us_);
+            correction_updated_tick_ms_ = temporal_state_ ? temporal_state_->output_completed_ms : update_tick;
             correction_available_ = true;
             ++worker_output_frames_;
         }
@@ -395,7 +393,8 @@ void D3D11Renderer::render(const VideoFrame& frame)
     // Sample the rendered video before drawing messages, without blocking for a readback.
     context_->OMSetRenderTargets(0, nullptr, nullptr);
     blackout_probe_.submit(device_.Get(), context_.Get(), back_buffer.Get(), frame.bgra.data(),
-        frame.bgra.size(), frame.width, frame.height, correction_active_, now);
+        frame.bgra.size(), frame.width, frame.height, correction_active_, now,
+        frame.gpu ? 96 : frame.width, frame.gpu ? frame.analysis_height : frame.height);
     draw_status_overlay();
     present(0, DXGI_PRESENT_DO_NOT_WAIT);
 }

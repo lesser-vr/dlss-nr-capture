@@ -17,8 +17,10 @@ class D3D11Renderer {
 public:
     ~D3D11Renderer();
     void initialize(HWND window);
+    ID3D11Device* device() const noexcept { return device_.Get(); }
     void resize(uint32_t width, uint32_t height);
     void render(const VideoFrame& frame);
+    void set_temporal_state(WorkerTemporalState* value) noexcept { temporal_state_ = value; }
     void clear();
     std::wstring take_diagnostic() { return std::exchange(diagnostic_, {}); }
     void redraw_idle();
@@ -50,6 +52,7 @@ public:
     void set_worker_processing_time_us(uint64_t value) noexcept { worker_processing_time_us_ = value; }
 
 private:
+    WorkerTemporalState* temporal_state_{};
     void present(UINT interval, UINT flags);
     BlackoutProbe blackout_probe_;
     std::wstring diagnostic_;

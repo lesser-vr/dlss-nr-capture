@@ -426,6 +426,13 @@ bool NvofPrepareFrame(
         g_ofa.current ^= 1;
         return true; // Consumer performs bounded GPU-copy synchronization.
     }
+    if (!NvofReadCurrentFlow(out,error)) return false;
+    g_ofa.current ^= 1;
+    return true;
+}
+
+bool NvofReadCurrentFlow(NvofFlowFrame& out, std::string& error) {
+    if (!g_ofa.flow || !g_ofa.flow_staging) { error="No computed flow to read"; return false; }
     // Copy to staging + Map is the synchronization point for the private D3D11
     // device. D3D11 NVOF handles device synchronization internally.
     g_ofa.context->CopyResource(g_ofa.flow_staging.Get(), g_ofa.flow.Get());
@@ -451,9 +458,6 @@ bool NvofPrepareFrame(
     }
     g_ofa.context->Unmap(g_ofa.flow_staging.Get(), 0);
 
-    // Advance after successful delivery. Next frame writes the other input slot
-    // and compares it against the frame just used as current.
-    g_ofa.current ^= 1;
     return true;
 }
 

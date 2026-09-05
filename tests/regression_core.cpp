@@ -295,7 +295,7 @@ int wmain(int argc, wchar_t** argv) {
     check(nr_notification_opacity(1250) == 0.5f, "NR notification fade midpoint");
     check(nr_notification_opacity(1500) == 0.0f, "NR notification expires after 1.5 seconds");
     check(nr_notification_opacity(5000) == 0.0f, "NR notification stays expired");
-    check(nr_worker_protocol_version == 6, "worker protocol version changed unexpectedly");
+    check(nr_worker_protocol_version == 8, "worker protocol version changed unexpectedly");
     WorkerTemporalState state{};
     check(state.magic == nr_worker_protocol_magic, "protocol magic default");
     check(state.byte_size == sizeof(WorkerTemporalState), "protocol byte size default");
@@ -382,7 +382,9 @@ int wmain(int argc, wchar_t** argv) {
             check(GetProcAddress(bridge, "dlss5nr_create_correction_target") != nullptr,
                   "bridge shared correction target export");
             check(GetProcAddress(bridge, "dlss5nr_shutdown") != nullptr, "bridge shutdown export");
-            check(GetProcAddress(bridge, "dlss5nr_get_timings") != nullptr, "bridge timings export");
+            check(GetProcAddress(bridge, "dlss5nr_get_timings_v2") != nullptr, "versioned bridge timings export");
+            check(GetProcAddress(bridge, "dlss5nr_get_timings") == nullptr, "reject unsafe legacy timing struct");
+            check(GetProcAddress(bridge, "dlss5nr_test_flow_failure") != nullptr, "isolated flow failure probe");
             FreeLibrary(bridge);
         }
     } else check(false, "runtime bridge path argument missing");

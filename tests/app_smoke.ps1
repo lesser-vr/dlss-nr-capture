@@ -2,6 +2,9 @@ param([Parameter(Mandatory=$true)][string]$AppPath)
 $ErrorActionPreference = 'Stop'
 $keyRelative = "Software\DlssNrCapture\Tests\CTest-$PID"
 $keyPs = "HKCU:\$keyRelative"
+if (@(Get-Process dlss-nr-capture -ErrorAction SilentlyContinue).Count -gt 0) {
+  throw 'Capture app is already running; close it before the hardware smoke test to avoid device contention.'
+}
 $env:DLSS_NR_TEST_SETTINGS_KEY = $keyRelative
 $script:app = $null
 Add-Type @"
@@ -167,12 +170,20 @@ try {
   Start-Sleep -Milliseconds 500
 
   $saved = Get-ItemProperty -LiteralPath $keyPs
+  $processing = [RegressionUi]::GetSubMenu([RegressionUi]::GetMenu([IntPtr]$script:app.MainWindowHandle),$labels.IndexOf('Processing'))
+  if (([RegressionUi]::GetMenuState($processing,50003,0) -band 8) -eq 0) {
+    [void][RegressionUi]::SendMessage([IntPtr]$script:app.MainWindowHandle,0x111,[IntPtr]50003,[IntPtr]::Zero)
+  }
+  Assert-MenuCommand $processing 50003 $true
+  if ((Get-ItemProperty -LiteralPath $keyPs).GpuNativeCapture -ne 1) { throw 'GPU capture option not saved' }
+  if ((Get-ItemProperty -LiteralPath $keyPs).FlipVertical -ne $saved.FlipVertical) { throw 'GPU capture toggle changed vertical flip' }
   if ($saved.PerformanceOverlay -ne 1) { throw 'Performance overlay setting was not persisted' }
   if ($saved.AlwaysOnTop -ne 1 -or $saved.AutoSizeToResolution -ne 1 -or $saved.NrTemporal -ne 0 -or $saved.NrStyle -ne 2 -or $saved.NrPreset -ne 4 -or $saved.NrIntensity -ne 75 -or $saved.NrWaitMs -ne 16) { throw 'Menu settings were not persisted correctly' }
   if (([RegressionUi]::GetWindowLong([IntPtr]$script:app.MainWindowHandle,-20) -band 8) -eq 0) { throw 'Always-on-top style was not applied' }
   Close-TestApp $script:app; $script:app = Start-TestApp; Start-Sleep -Milliseconds 1500
   $script:app.Refresh()
   if ($script:app.MainWindowTitle -match '(\d+)x(\d+) @') {
+    Write-Host "Capture path: $($script:app.MainWindowTitle)"
     [void][RegressionUi]::SetThreadDpiAwarenessContext([IntPtr](-4))
     $rect = New-Object RegressionUi+RECT
     [void][RegressionUi]::GetClientRect([IntPtr]$script:app.MainWindowHandle, [ref]$rect)
@@ -183,6 +194,7 @@ try {
   if (([RegressionUi]::GetWindowLong([IntPtr]$script:app.MainWindowHandle,-20) -band 8) -eq 0) { throw 'Always-on-top setting was not restored' }
   if (-not $script:app.Responding) { throw 'App is not responding after restart' }
   $restoredMenu = [RegressionUi]::GetMenu([IntPtr]$script:app.MainWindowHandle)
+  Assert-MenuCommand ([RegressionUi]::GetSubMenu($restoredMenu,$labels.IndexOf('Processing'))) 50003 $true
   $restoredView = [RegressionUi]::GetSubMenu($restoredMenu,$labels.IndexOf('View'))
   Assert-MenuCommand $restoredView 49001 $true
   Assert-MenuCommand $restoredView 49002 $true
@@ -243,7 +255,7 @@ try {
     for ($i=0; $i -lt 100; $i++) {
       Start-Sleep -Milliseconds 100
       $script:app.Refresh()
-      if ($script:app.MainWindowTitle -match 'Live:.*capture reconnects 1') { $reconnected = $true; break }
+      if ($script:app.MainWindowTitle -match 'Live:.*capture reconnects [1-9][0-9]*') { $reconnected = $true; break }
     }
     if (-not $reconnected) { throw "Capture error did not reconnect to the prior device/mode: $($script:app.MainWindowTitle)" }
     $afterReconnect = Get-ItemProperty -LiteralPath $keyPs

@@ -24,6 +24,7 @@ private:
     void update_capture_power();
     CapturePowerRequest capture_power_;
     bool prevent_capture_sleep_{true};
+    bool gpu_capture_enabled_{};
     bool power_error_logged_{};
     static LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam);
     static LRESULT CALLBACK combo_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam);

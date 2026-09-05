@@ -4,14 +4,22 @@
 #include <dxgi1_4.h>
 #include <iostream>
 #include <vector>
+#include <filesystem>
 
 int wmain(int argc, wchar_t** argv) {
     try {
         ComPtr<IDXGIFactory4> factory;
         throw_if_failed(CreateDXGIFactory1(IID_PPV_ARGS(&factory)), "Create factory");
         ComPtr<IDXGIAdapter1> adapter;
-        const bool nr = argc == 2;
+        const bool nr = argc >= 2;
+        const unsigned injection=argc>=3 ? static_cast<unsigned>(_wtoi(argv[2])) : 0;
+        HMODULE bridge=nullptr;
         if (nr) {
+            const auto bridge_path=std::filesystem::path(argv[1]).parent_path()/L"nr-runtime"/L"dlss5nr_bridge.dll";
+            bridge=LoadLibraryExW(bridge_path.c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_SYSTEM32);
+            if(!bridge) throw std::runtime_error("Load bridge for flow probe");
+            auto inject=reinterpret_cast<int(__cdecl*)(unsigned)>(GetProcAddress(bridge,"dlss5nr_test_flow_failure"));
+            if(!inject || !inject(injection)) throw std::runtime_error("Flow probe injection rejected");
             for (UINT i = 0; factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i) {
                 DXGI_ADAPTER_DESC1 desc{}; adapter->GetDesc1(&desc);
                 if (desc.VendorId == 0x10DE) break;
@@ -62,11 +70,16 @@ int wmain(int argc, wchar_t** argv) {
                     std::cout << "frame " << frame << " total_us=" << timing.total_us
                               << " input_us=" << timing.input_us << '\n';
                 }
+                if (argc>=3 && frame>=10 && frame<30) {
+                    NrTimingSnapshot timing{}; api->get_timings(&timing);
+                    if(timing.flow_mode!=(injection?3u:1u) || (injection && timing.flow_error==0)) throw std::runtime_error("Unexpected flow recovery mode");
+                }
             }
             api->shutdown(); FreeLibrary(module);
             std::cout << "NR unload/reload cycle " << cycle + 1 << " complete\n";
             }
             std::cout << "NR shared input probe passed (synthetic frames, not visual quality verification)\n";
+            FreeLibrary(bridge);
             return 0;
         }
         ComPtr<ID3D12CommandQueue> queue;

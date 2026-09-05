@@ -2,6 +2,7 @@
 
 #include <mfapi.h>
 #include <mferror.h>
+#include <d3d10.h>
 
 #include <algorithm>
 #include <limits>
@@ -116,6 +117,7 @@ std::vector<CaptureMode> CaptureEngine::enumerate_modes(const CaptureDevice& dev
     ComPtr<IMFAttributes> attributes;
     throw_if_failed(MFCreateAttributes(&attributes, 1), "MFCreateAttributes");
     attributes->SetUINT32(MF_READWRITE_DISABLE_CONVERTERS, TRUE);
+
     ComPtr<IMFSourceReader> reader;
     throw_if_failed(MFCreateSourceReaderFromMediaSource(source.Get(), attributes.Get(), &reader),
                     "Create mode-enumeration reader");
@@ -156,6 +158,7 @@ void CaptureEngine::start(const CaptureDevice& device, const CaptureMode& mode,
                           FrameCallback on_frame, ErrorCallback on_error)
 {
     stop();
+    path_=0;
     if (!mode.supported)
         throw std::runtime_error("The selected native format is listed but not yet decodable");
 
@@ -169,10 +172,25 @@ void CaptureEngine::start(const CaptureDevice& device, const CaptureMode& mode,
                     "Set source reader callback");
     attributes->SetUINT32(MF_LOW_LATENCY, TRUE);
     attributes->SetUINT32(MF_READWRITE_DISABLE_CONVERTERS, TRUE);
+    const bool gpu_reader_requested = gpu_device_ && gpu_requested_.load() &&
+        (mode.subtype == MFVideoFormat_NV12 || mode.subtype == MFVideoFormat_P010 ||
+         mode.subtype == MFVideoFormat_RGB32 || mode.subtype == MFVideoFormat_ARGB32);
+    if (gpu_reader_requested) {
+        UINT token{};
+        if (!gpu_manager_ && SUCCEEDED(MFCreateDXGIDeviceManager(&token, &gpu_manager_))) {
+            if (FAILED(gpu_manager_->ResetDevice(gpu_device_.Get(), token))) gpu_manager_.Reset();
+        }
+        if (gpu_manager_) attributes->SetUnknown(MF_SOURCE_READER_D3D_MANAGER, gpu_manager_.Get());
+    }
 
     ComPtr<IMFSourceReader> reader;
-    throw_if_failed(MFCreateSourceReaderFromMediaSource(source.Get(), attributes.Get(), &reader),
-                    "MFCreateSourceReaderFromMediaSource");
+    HRESULT reader_result = MFCreateSourceReaderFromMediaSource(source.Get(), attributes.Get(), &reader);
+    if (FAILED(reader_result) && gpu_manager_ && gpu_reader_requested) {
+        reader.Reset();
+        attributes->DeleteItem(MF_SOURCE_READER_D3D_MANAGER);
+        reader_result = MFCreateSourceReaderFromMediaSource(source.Get(), attributes.Get(), &reader);
+    }
+    throw_if_failed(reader_result, "MFCreateSourceReaderFromMediaSource");
     ComPtr<IMFMediaType> selected;
     throw_if_failed(reader->GetNativeMediaType(video_stream, mode.native_index, &selected),
                     "Get selected native capture mode");
@@ -356,6 +374,43 @@ HRESULT CaptureEngine::OnReadSample(HRESULT status, DWORD, DWORD flags,
     }
 
     if ((flags & MF_SOURCE_READERF_STREAMTICK) == 0 && sample) {
+        const uint64_t arrival = GetTickCount64();
+        unsigned next_path=!gpu_requested_.load()?2u:!gpu_allowed_.load()?3u:4u;
+        if (gpu_device_ && gpu_requested_.load() && gpu_allowed_.load()) {
+            std::scoped_lock gpu_lock(gpu_mutex_);
+            ComPtr<IMFMediaBuffer> native;
+            ComPtr<IMFDXGIBuffer> dxgi;
+            ComPtr<ID3D11Texture2D> texture;
+            UINT subresource{};
+            VideoFrame frame;
+            FrameCallback callback;
+            if (SUCCEEDED(sample->GetBufferByIndex(0, &native)) &&
+                SUCCEEDED(native.As(&dxgi)) &&
+                SUCCEEDED(dxgi->GetResource(IID_PPV_ARGS(&texture))) &&
+                SUCCEEDED(dxgi->GetSubresourceIndex(&subresource))) {
+              next_path=5;
+              if (gpu_converter_.convert(gpu_device_.Get(), texture.Get(), subresource,
+                    frame.gpu, frame.bgra, frame.analysis_height)) {
+                {
+                    std::scoped_lock lock(mutex_);
+                    frame.width = width_; frame.height = height_;
+                    frame.sequence = sequence_++; callback = on_frame_;
+                }
+                D3D11_TEXTURE2D_DESC converted{}; frame.gpu->texture->GetDesc(&converted);
+                // Native coded surfaces may include padding beyond the negotiated image.
+                // Do not copy mismatched dimensions into the renderer's resource.
+                if (converted.Width == frame.width && converted.Height == frame.height) {
+                    path_=1;
+                    frame.timestamp_100ns = timestamp;
+                    frame.arrival_tick_ms = arrival;
+                    if (callback) { ++gpu_frames_; callback(std::move(frame)); }
+                    request_next();
+                    return S_OK;
+                }
+                next_path=6;
+              }
+            }
+        }
         ComPtr<IMFMediaBuffer> buffer;
         if (SUCCEEDED(sample->ConvertToContiguousBuffer(&buffer))) {
             BYTE* bytes = nullptr;
@@ -373,9 +428,12 @@ HRESULT CaptureEngine::OnReadSample(HRESULT status, DWORD, DWORD flags,
                     callback = on_frame_;
                 }
                 frame.timestamp_100ns = timestamp;
-                frame.arrival_tick_ms = GetTickCount64();
-                if (convert_to_bgra(format, bytes, length, frame.width, frame.height, frame.bgra) && callback)
+                frame.arrival_tick_ms = arrival;
+                if (convert_to_bgra(format, bytes, length, frame.width, frame.height, frame.bgra) && callback) {
+                    path_=next_path;
+                    ++cpu_frames_;
                     callback(std::move(frame));
+                }
                 buffer->Unlock();
             }
         }

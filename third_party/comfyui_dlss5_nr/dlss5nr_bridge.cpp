@@ -137,9 +137,15 @@ static NGXHandle* g_feature = nullptr;
 static ComPtr<ID3D12Resource> g_color;
 static ComPtr<ID3D12Resource> g_output;
 static SharedGpuInput g_shared_input;
-#if defined(DLSS_NR_EXPERIMENTAL_GPU_FLOW)
 static SharedGpuInput g_shared_flow;
+#if defined(DLSS_NR_EXPERIMENTAL_GPU_FLOW)
+static bool g_gpu_flow = true;
+#else
+static bool g_gpu_flow = false;
 #endif
+static unsigned g_flow_error{};
+static unsigned g_flow_test_failure{}; // Explicit isolated-test injection: 1=create, 2=copy, 3=timeout.
+static unsigned g_flow_copy_count{};
 static ComPtr<ID3D12Resource> g_readback;
 static ComPtr<ID3D12Resource> g_correction_target;
 static ComPtr<ID3D12Resource> g_rejection_mask_upload;
@@ -433,7 +439,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     const D3D_SHADER_MACRO* macros = nullptr;
 #if defined(DLSS_NR_EXPERIMENTAL_GPU_FLOW)
     const D3D_SHADER_MACRO gpu_macros[] = {{"GPU_FLOW", "1"}, {nullptr, nullptr}};
-    macros = gpu_macros;
+    if (g_gpu_flow) macros = gpu_macros;
 #endif
     HRESULT hr = D3DCompile(shader_source, sizeof(shader_source) - 1, nullptr, macros, nullptr,
                             "main", "cs_5_0", 0, 0, &shader, &errors);
@@ -493,16 +499,16 @@ static bool CreateMotionVectorDescriptors() {
     srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srv.Buffer.NumElements = g_flow_capacity_width * g_flow_capacity_height;
     srv.Buffer.StructureByteStride = sizeof(uint32_t);
-#if defined(DLSS_NR_EXPERIMENTAL_GPU_FLOW)
+    if (g_gpu_flow) {
     srv = {};
     srv.Format = DXGI_FORMAT_R16G16_SINT;
     srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srv.Texture2D.MipLevels = 1;
     g_device->CreateShaderResourceView(g_shared_flow.resource(), &srv, handle);
-#else
+    } else {
     g_device->CreateShaderResourceView(g_mvec_upload.Get(), &srv, handle);
-#endif
+    }
     handle.ptr += stride;
     D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
     uav.Format = DXGI_FORMAT_R16G16_FLOAT;
@@ -784,21 +790,21 @@ static bool UploadMotionVectorTexture(const NvofFlowFrame* flow, bool execute_no
         return false;
     }
 
-#if defined(DLSS_NR_EXPERIMENTAL_GPU_FLOW)
-    const UINT flow_width = flow && flow->has_flow ? flow->width : 0;
-    const UINT flow_height = flow && flow->has_flow ? flow->height : 0;
+    UINT flow_width = flow && flow->has_flow ? flow->width : 0;
+    UINT flow_height = flow && flow->has_flow ? flow->height : 0;
+    if (g_gpu_flow) {
     auto flow_read = Barrier(g_shared_flow.resource(), D3D12_RESOURCE_STATE_COMMON,
                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     g_cmd->ResourceBarrier(1, &flow_read);
-#else
+    } else {
     void* mapped = nullptr;
     HRESULT hr = g_mvec_upload->Map(0, nullptr, &mapped);
     if (FAILED(hr) || !mapped) {
         SetError("Motion-vector upload Map failed: 0x%08X", static_cast<unsigned>(hr));
         return false;
     }
-    UINT flow_width = g_flow_capacity_width;
-    UINT flow_height = g_flow_capacity_height;
+    flow_width = g_flow_capacity_width;
+    flow_height = g_flow_capacity_height;
     if (flow && flow->has_flow) {
         if (flow->width == 0 || flow->height == 0 ||
             flow->width > g_flow_capacity_width || flow->height > g_flow_capacity_height ||
@@ -813,7 +819,7 @@ static bool UploadMotionVectorTexture(const NvofFlowFrame* flow, bool execute_no
     } else
         memset(mapped, 0, static_cast<size_t>(g_mvec_total_bytes));
     g_mvec_upload->Unmap(0, nullptr);
-#endif
+    }
 
     auto to_write = Barrier(
         g_mvec.Get(),
@@ -831,11 +837,11 @@ static bool UploadMotionVectorTexture(const NvofFlowFrame* flow, bool execute_no
     const UINT dimensions[] = {g_width, g_height, flow_width, flow_height};
     g_cmd->SetComputeRoot32BitConstants(2, 4, dimensions, 0);
     g_cmd->Dispatch((g_width + 7) / 8, (g_height + 7) / 8, 1);
-#if defined(DLSS_NR_EXPERIMENTAL_GPU_FLOW)
+    if (g_gpu_flow) {
     auto flow_release = Barrier(g_shared_flow.resource(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                                D3D12_RESOURCE_STATE_COMMON);
     g_cmd->ResourceBarrier(1, &flow_release);
-#endif
+    }
 
     auto to_read = Barrier(
         g_mvec.Get(),
@@ -863,9 +869,7 @@ static void ReleaseFeatureAndResources() {
     g_correction_descriptors.Reset(); g_correction_rtv_heap.Reset();
     g_color.Reset(); g_output.Reset(); g_shared_input.reset(); g_readback.Reset();
     g_mvec.Reset(); g_mvec_upload.Reset(); g_mvec_descriptors.Reset();
-#if defined(DLSS_NR_EXPERIMENTAL_GPU_FLOW)
     g_shared_flow.reset();
-#endif
     g_width = g_height = g_row_pitch = 0;
     g_total_bytes = 0;
     g_mvec_total_bytes = 0;
@@ -905,16 +909,19 @@ static bool AllocateFrameResources(UINT w, UINT h, bool use_motion_vectors) {
         g_flow_capacity_height = (h + 1) / 2;
         g_mvec_total_bytes = static_cast<UINT64>(g_flow_capacity_width) *
             g_flow_capacity_height * sizeof(uint32_t);
-#if defined(DLSS_NR_EXPERIMENTAL_GPU_FLOW)
-        if (FAILED(g_shared_flow.create(g_device.Get(), g_flow_capacity_width,
-                                       g_flow_capacity_height, DXGI_FORMAT_R16G16_TYPELESS))) {
-            SetError("Failed to create shared coarse-flow texture"); return false;
+        if (g_gpu_flow) {
+            const HRESULT hr = g_flow_test_failure == 1 ? E_FAIL : g_shared_flow.create(g_device.Get(), g_flow_capacity_width,
+                                       g_flow_capacity_height, DXGI_FORMAT_R16G16_TYPELESS);
+            if (FAILED(hr)) {
+                g_gpu_flow=false; g_flow_error=static_cast<unsigned>(hr);
+                g_mvec_pipeline.Reset(); g_mvec_root_signature.Reset();
+            }
         }
-#else
+        if (!g_gpu_flow) {
         g_mvec_upload = CreateLinearBuffer(
             g_mvec_total_bytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
         if (!g_mvec_upload) { SetError("Failed to create motion-vector upload buffer"); return false; }
-#endif
+        }
         if (!CreateMotionVectorDescriptors()) return false;
 
         // Feature creation always starts with a defined zero-MV resource. The
@@ -1181,6 +1188,12 @@ __declspec(dllexport) int __cdecl dlss5nr_init(int gpu_index, const wchar_t* run
     std::lock_guard<std::mutex> guard(g_mutex);
     g_last_error.clear();
     if (g_initialized) { CopyError(err, err_cap); return 1; }
+    g_flow_error=0; g_flow_copy_count=0;
+#if defined(DLSS_NR_EXPERIMENTAL_GPU_FLOW)
+    g_gpu_flow=true;
+#else
+    g_gpu_flow=false;
+#endif
     if (!runtime_dir || !*runtime_dir) { SetError("runtime_dir is empty"); CopyError(err, err_cap); return 0; }
 
     g_gpu_index = gpu_index;
@@ -1279,13 +1292,9 @@ __declspec(dllexport) int __cdecl dlss5nr_process(
     if (use_motion_vectors) {
         NvofFlowFrame flow;
         std::string of_error;
-        bool gpu_flow = false;
-#if defined(DLSS_NR_EXPERIMENTAL_GPU_FLOW)
-        gpu_flow = true;
-#endif
         if (!NvofPrepareFrame(g_adapter.Get(), input_device, input_context,
                 input_texture, static_cast<UINT>(width), static_cast<UINT>(height),
-                reset != 0, flow, of_error, gpu_flow)) {
+                reset != 0, flow, of_error, g_gpu_flow)) {
             SetError("%s", of_error.c_str());
             CopyError(err, err_cap);
             return 0;
@@ -1293,15 +1302,19 @@ __declspec(dllexport) int __cdecl dlss5nr_process(
         const auto flow_end = TimingClock::now();
         g_timings.optical_flow_us = ElapsedUs(flow_start, flow_end);
         const auto motion_start = flow_end;
-#if defined(DLSS_NR_EXPERIMENTAL_GPU_FLOW)
-        if (flow.has_flow) {
-            const HRESULT hr = g_shared_flow.copy_from(g_device.Get(), input_device, input_context, flow.gpu_texture);
+        if (g_gpu_flow && flow.has_flow) {
+            HRESULT hr = g_shared_flow.copy_from(g_device.Get(), input_device, input_context, flow.gpu_texture);
+            if (++g_flow_copy_count == 8 && (g_flow_test_failure==2 || g_flow_test_failure==3))
+                hr = g_flow_test_failure==3 ? HRESULT_FROM_WIN32(WAIT_TIMEOUT) : E_FAIL;
             if (FAILED(hr)) {
-                SetError("Shared GPU flow copy failed: 0x%08X", static_cast<unsigned>(hr));
-                CopyError(err, err_cap); return 0;
+                // Preserve this frame's flow and NVOF pair. Do not evaluate the same input twice.
+                if (!NvofReadCurrentFlow(flow,of_error)) { SetError("%s",of_error.c_str()); CopyError(err,err_cap); return 0; }
+                g_gpu_flow=false; g_flow_error=static_cast<unsigned>(hr);
+                g_mvec_pipeline.Reset(); g_mvec_root_signature.Reset();
+                g_mvec_upload=CreateLinearBuffer(g_mvec_total_bytes,D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ);
+                if (!g_mvec_upload || !CreateMotionVectorDescriptors()) { SetError("CPU flow recovery allocation failed"); CopyError(err,err_cap); return 0; }
             }
         }
-#endif
         // First frame: no previous image exists, so this deliberately writes zero
         // MVs. Later frames upload NVOFA current->previous optical flow.
         if (!UploadMotionVectorTexture(flow.has_flow ? &flow : nullptr, false)) {
@@ -1384,9 +1397,20 @@ __declspec(dllexport) int __cdecl dlss5nr_process(
     return 1;
 }
 
-__declspec(dllexport) void __cdecl dlss5nr_get_timings(NrTimingSnapshot* result) {
+__declspec(dllexport) void __cdecl dlss5nr_get_timings_v2(NrTimingSnapshot* result) {
     std::lock_guard<std::mutex> guard(g_mutex);
-    if (result) *result = g_timings;
+    if (result) {
+        *result = g_timings;
+        result->flow_mode=g_feature_motion==1 ? (g_gpu_flow?1u:g_flow_error?3u:2u) : 0u;
+        result->flow_error=g_flow_error;
+    }
+}
+
+// Called only by an explicit in-process regression harness before initialization.
+__declspec(dllexport) int __cdecl dlss5nr_test_flow_failure(unsigned mode) {
+    std::lock_guard<std::mutex> guard(g_mutex);
+    if(g_initialized || mode>3) return 0;
+    g_flow_test_failure=mode; return 1;
 }
 
 __declspec(dllexport) void __cdecl dlss5nr_shutdown() {

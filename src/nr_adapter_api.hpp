@@ -3,7 +3,7 @@
 #include <d3d11.h>
 #include <cstdint>
 
-constexpr uint32_t nr_adapter_abi_version = 4;
+constexpr uint32_t nr_adapter_abi_version = 5;
 
 struct NrTimingSnapshot {
     uint64_t total_us{};
@@ -15,6 +15,8 @@ struct NrTimingSnapshot {
     uint64_t gpu_execute_us{};
     uint64_t bridge_output_us{};
     uint64_t correction_output_us{};
+    uint32_t flow_mode{}; // 0=inactive, 1=GPU, 2=CPU, 3=CPU after GPU failure.
+    uint32_t flow_error{}; // Original sharing HRESULT, retained for diagnostics.
 };
 
 using NrAdapterInitialize = bool (__stdcall*)(ID3D11Device*, const D3D11_TEXTURE2D_DESC*);

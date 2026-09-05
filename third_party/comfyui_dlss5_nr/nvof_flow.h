@@ -44,6 +44,8 @@ bool NvofPrepareFrame(
 
 // Releases the active OFA session and its D3D11 textures, but keeps no contract state.
 void NvofReleaseSession();
+// Read the already computed field without advancing the input pair a second time.
+bool NvofReadCurrentFlow(NvofFlowFrame& out, std::string& error);
 
 // Full teardown including nvofapi64.dll.
 void NvofShutdown();
