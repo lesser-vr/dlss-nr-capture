@@ -334,6 +334,7 @@ void D3D11Renderer::ensure_frame_texture(uint32_t width, uint32_t height)
 
 void D3D11Renderer::render(const VideoFrame& frame)
 {
+    presented_=false;
     if (!swap_chain_ || frame.bgra.empty())
         return;
     ensure_frame_texture(frame.width, frame.height);

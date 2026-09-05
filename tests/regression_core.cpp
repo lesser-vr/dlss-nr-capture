@@ -58,6 +58,21 @@ int wmain(int argc, wchar_t** argv) {
         check(clock.delay(40000000)==0,"AV stale clock expires");
         clock.reset();check(clock.delay(40000000)==0,"AV mode change resets clock");
         clock.observe(0,40000000,40000000);check(clock.delay(40000000)==0,"AV new timestamp epoch");
+        // Deterministic scheduling tests, not physical audiovisual measurements.
+        int64_t stream=0; uint64_t arrival=50000000;
+        for(int fps : {30,60,30}) for(int latency_ms : {0,20,50,0}) {
+            clock.reset();
+            for(int i=0;i<120;++i){
+                stream+=10000000/fps;arrival+=10000000/fps;
+                clock.observe(stream,arrival,arrival+latency_ms*10000);
+            }
+            check(std::abs(int(clock.delay(arrival))-latency_ms)<=3,"AV FPS and NR latency transition settles within 3 ms");
+        }
+        clock.reset();
+        for(int i=0;i<120;++i){arrival+=166666;clock.observe(i*166666,arrival,arrival+4000000);}
+        check(clock.delay(arrival)<=200 && clock.delay(arrival)>=197,"AV excessive delay bounded at 200 ms");
+        clock.reset();clock.observe(0,arrival,arrival-1);
+        check(clock.delay(arrival)==0,"AV invalid presentation timestamp ignored");
     }
     {
         CapturePowerRequest request(fake_power);
