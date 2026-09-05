@@ -4,6 +4,7 @@ param(
   [switch]$CaptureOutput,
   [switch]$FullResolution,
   [switch]$GpuCapture,
+  [ValidateSet('BGRA','NV12','P010')][string]$CaptureFormat='BGRA',
   [ValidateRange(0,3)][int]$TestFlowFailure = 0,
   [ValidateRange(1,8192)][int]$QualityWidth = 320,
   [ValidateRange(1,8192)][int]$QualityHeight = 180,
@@ -37,6 +38,7 @@ $arguments = @('--output', $OutputDir, '--warmup', $Warmup, '--frames', $Frames,
     '--style', $Style, '--preset', $Preset, '--intensity', $Intensity, '--temporal', $Temporal)
 if ($CaptureOutput) { $arguments += '--capture-output' }
 if ($GpuCapture) { $arguments += '--gpu-capture' }
+$arguments += @('--capture-format',$CaptureFormat)
 if ($PSBoundParameters.ContainsKey('TestFlowFailure')) { $arguments += @('--test-flow-failure',$TestFlowFailure) }
 if (-not $CaptureOutput -and ($FullResolution -or $QualityWidth -ne 320 -or $QualityHeight -ne 180 -or
     $RegionX -or $RegionY -or $RegionWidth -or $RegionHeight)) { throw 'Quality options require -CaptureOutput' }

@@ -3,6 +3,7 @@
 #include "benchmark_stats.hpp"
 #include "frame_processor.hpp"
 #include "quality_capture.hpp"
+#include "capture_replay.hpp"
 #include <dxgi1_4.h>
 #include <mfapi.h>
 #include <mfidl.h>
@@ -57,6 +58,7 @@ int wmain(int argc, wchar_t** argv) {
             if (key == L"--help") {
                 std::cout << "--input VIDEO (or --synthetic) --output NEW_DIRECTORY [--adapter DLL]\n"
                     "[--frames 300] [--warmup 120] [--style 1] [--preset 3] [--intensity 100] [--temporal 1] [--warp] [--capture-output]\n"
+                    "[--capture-format BGRA|NV12|P010] [--gpu-capture]\n"
                     "Offline sequential benchmark; no capture/presentation, no real-time drop or fallback measurement.\n";
                 std::cout << "--full-resolution or --quality-width/--quality-height; optional --quality-x/--quality-y/--quality-region-width/--quality-region-height\n";
                 std::cout << "--gpu-capture replays decoded BGRA through native conversion/analysis (not hardware capture); --test-flow-failure 0..3 is an isolated recovery probe\n";
@@ -66,7 +68,7 @@ int wmain(int argc, wchar_t** argv) {
             else if (key == L"--input" || key == L"--output" || key == L"--adapter" || key == L"--frames" ||
                      key == L"--warmup" || key == L"--style" || key == L"--preset" || key == L"--intensity" || key == L"--temporal" ||
                      key == L"--quality-width" || key == L"--quality-height" || key == L"--quality-x" || key == L"--quality-y" ||
-                     key == L"--quality-region-width" || key == L"--quality-region-height" || key == L"--test-flow-failure") {
+                     key == L"--quality-region-width" || key == L"--quality-region-height" || key == L"--test-flow-failure" || key==L"--capture-format") {
                 if (++i == argc) throw std::runtime_error("Missing option value");
                 args[key] = argv[i];
             } else throw std::runtime_error("Unknown option (see --help)");
@@ -82,6 +84,8 @@ int wmain(int argc, wchar_t** argv) {
         const unsigned intensity = number(L"--intensity", 100, 25, 100), temporal = number(L"--temporal", 1, 0, 1);
         const unsigned flow_failure=number(L"--test-flow-failure",0,0,3);
         const bool gpu_capture=args.count(L"--gpu-capture")!=0;
+        const auto capture_format=args.count(L"--capture-format")?args.at(L"--capture-format"):L"BGRA";
+        if(capture_format!=L"BGRA" && capture_format!=L"NV12" && capture_format!=L"P010")throw std::runtime_error("Capture replay format must be BGRA/NV12/P010");
         if (!args.count(L"--output") || (args.count(L"--input") + args.count(L"--synthetic") != 1))
             throw std::runtime_error("Specify --output and exactly one of --input / --synthetic");
         const fs::path output = fs::absolute(args.at(L"--output"));
@@ -145,6 +149,8 @@ int wmain(int argc, wchar_t** argv) {
         desc.MipLevels = 1; desc.ArraySize = 1; desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
         desc.SampleDesc.Count = 1; desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
         ComPtr<ID3D11Texture2D> texture; throw_if_failed(device->CreateTexture2D(&desc, nullptr, &texture), "Input texture");
+        ComPtr<ID3D11Texture2D> planar;
+        if(capture_format!=L"BGRA" && gpu_capture){auto d=desc;d.Format=capture_format==L"P010"?DXGI_FORMAT_P010:DXGI_FORMAT_NV12;throw_if_failed(device->CreateTexture2D(&d,nullptr,&planar),"Planar replay texture");}
         Runtime runtime;
         if (args.count(L"--test-flow-failure")) {
             const auto bridge=adapter_path.parent_path()/L"nr-runtime"/L"dlss5nr_bridge.dll";
@@ -227,13 +233,16 @@ int wmain(int argc, wchar_t** argv) {
                 }
             }
             const auto decode_us = us(start);
+            std::vector<uint8_t> planar_bytes;
+            if(capture_format!=L"BGRA")planar_bytes=planar_replay(frame.bgra,width,height,capture_format==L"P010");
             std::vector<uint8_t> original;
             uint64_t conversion_us=0;
             if (gpu_capture) {
                 const auto conversion_start=Clock::now();
                 context->UpdateSubresource(texture.Get(),0,nullptr,frame.bgra.data(),width*4,0);
+                if(planar)context->UpdateSubresource(planar.Get(),0,nullptr,planar_bytes.data(),width*(capture_format==L"P010"?2:1),0);
                 original=std::move(frame.bgra);
-                if (!capture_converter.convert(device.Get(),texture.Get(),0,frame.gpu,frame.bgra,frame.analysis_height))
+                if (!capture_converter.convert(device.Get(),planar?planar.Get():texture.Get(),0,frame.gpu,frame.bgra,frame.analysis_height))
                     throw std::runtime_error("GPU capture conversion unavailable (no silent CPU fallback in comparison)");
                 conversion_us=us(conversion_start);
             }
@@ -281,6 +290,7 @@ int wmain(int argc, wchar_t** argv) {
             << ",\n  \"over_source_frame_budget\": " << over_budget
             << ",\n  \"capture_output\": " << (capture_output ? "true" : "false")
             << ",\n  \"gpu_capture_replay\": " << (gpu_capture ? "true" : "false")
+            << ",\n  \"capture_replay_format\": " << json(capture_format)
             << ",\n  \"flow_failure_injection\": " << flow_failure
             << ", \"performance_comparable\": " << (capture_output ? "false" : "true")
             << ",\n  \"proxy_format\": \"rgb24-nearest-v1\", \"proxy_width\": " << qw << ", \"proxy_height\": " << qh

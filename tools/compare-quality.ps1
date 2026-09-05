@@ -12,6 +12,9 @@ $OutputDir = [IO.Path]::GetFullPath($OutputDir)
 if (Test-Path -LiteralPath $OutputDir) { throw 'Use a new comparison directory' }
 $a = Get-Content -LiteralPath (Join-Path $Baseline 'summary.json') -Raw | ConvertFrom-Json
 $b = Get-Content -LiteralPath (Join-Path $Candidate 'summary.json') -Raw | ConvertFrom-Json
+$formatA=if($a.capture_replay_format){$a.capture_replay_format}else{'BGRA'}
+$formatB=if($b.capture_replay_format){$b.capture_replay_format}else{'BGRA'}
+if($formatA -ne $formatB){throw 'Capture replay formats differ'}
 foreach ($summary in @($a,$b)) {
  foreach ($field in @('quality_region_x','quality_region_y','quality_region_width','quality_region_height')) {
   if ($null -eq $summary.$field) {
