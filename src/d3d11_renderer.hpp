@@ -4,12 +4,14 @@
 #include "frame.hpp"
 #include "nr_speed_policy.hpp"
 #include "overlay_style.hpp"
+#include "blackout_probe.hpp"
 
 #include <d3d11.h>
 #include <d2d1_1.h>
 #include <dwrite.h>
 #include <dxgi1_6.h>
 #include <string>
+#include <utility>
 
 class D3D11Renderer {
 public:
@@ -18,6 +20,7 @@ public:
     void resize(uint32_t width, uint32_t height);
     void render(const VideoFrame& frame);
     void clear();
+    std::wstring take_diagnostic() { return std::exchange(diagnostic_, {}); }
     void redraw_idle();
     void set_capture_interrupted(bool value) noexcept { capture_interrupted_ = value; }
     void show_nr_toggle(bool enabled);
@@ -47,6 +50,12 @@ public:
     void set_worker_processing_time_us(uint64_t value) noexcept { worker_processing_time_us_ = value; }
 
 private:
+    void present(UINT interval, UINT flags);
+    BlackoutProbe blackout_probe_;
+    std::wstring diagnostic_;
+    int last_blackout_state_{-1};
+    HRESULT last_present_result_{S_OK};
+    uint64_t last_probe_log_ms_{};
     void ensure_frame_texture(uint32_t width, uint32_t height);
     void create_back_buffer();
     void initialize_correction_pipeline();

@@ -329,6 +329,17 @@ void D3D11Renderer::render(const VideoFrame& frame)
     if (!swap_chain_ || frame.bgra.empty())
         return;
     ensure_frame_texture(frame.width, frame.height);
+    if (const auto sample = blackout_probe_.poll(context_.Get())) {
+        const int state = (sample->source_dark ? 1 : 0) | (sample->output_dark ? 2 : 0) |
+                          (sample->nr_active ? 4 : 0);
+        const auto tick = GetTickCount64();
+        if (state != last_blackout_state_ || tick - last_probe_log_ms_ >= 60000) {
+            diagnostic_ += L"Video probe: source_dark=" + std::to_wstring(sample->source_dark) +
+                L" output_dark=" + std::to_wstring(sample->output_dark) +
+                L" nr_active=" + std::to_wstring(sample->nr_active) + L"; ";
+            last_blackout_state_ = state; last_probe_log_ms_ = tick;
+        }
+    }
     D3D11_MAPPED_SUBRESOURCE mapped{};
     throw_if_failed(context_->Map(frame_texture_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped),
                     "Map frame texture");
@@ -381,8 +392,12 @@ void D3D11Renderer::render(const VideoFrame& frame)
         context_->CopyResource(back_buffer.Get(), frame_texture_.Get());
         ++worker_fallback_frames_;
     }
+    // Sample the rendered video before drawing messages, without blocking for a readback.
+    context_->OMSetRenderTargets(0, nullptr, nullptr);
+    blackout_probe_.submit(device_.Get(), context_.Get(), back_buffer.Get(), frame.bgra.data(),
+        frame.bgra.size(), frame.width, frame.height, correction_active_, now);
     draw_status_overlay();
-    swap_chain_->Present(0, DXGI_PRESENT_DO_NOT_WAIT);
+    present(0, DXGI_PRESENT_DO_NOT_WAIT);
 }
 
 void D3D11Renderer::clear()
@@ -391,7 +406,7 @@ void D3D11Renderer::clear()
         return;
     constexpr float color[] = {0.015f, 0.018f, 0.024f, 1.0f};
     context_->ClearRenderTargetView(render_target_.Get(), color);
-    swap_chain_->Present(1, 0);
+    present(1, 0);
 }
 
 void D3D11Renderer::redraw_idle()
@@ -410,5 +425,18 @@ void D3D11Renderer::redraw_idle()
         context_->ClearRenderTargetView(render_target_.Get(), color);
     }
     draw_status_overlay();
-    swap_chain_->Present(0, DXGI_PRESENT_DO_NOT_WAIT);
+    present(0, DXGI_PRESENT_DO_NOT_WAIT);
+}
+
+void D3D11Renderer::present(UINT interval, UINT flags)
+{
+    const HRESULT hr = swap_chain_->Present(interval, flags);
+    // A busy nonblocking present is a dropped presentation, not device removal.
+    if (hr != DXGI_ERROR_WAS_STILL_DRAWING && hr != last_present_result_) {
+        wchar_t text[160]{};
+        swprintf_s(text, L"Present result=0x%08X device_removed_reason=0x%08X; ",
+                   static_cast<unsigned>(hr), static_cast<unsigned>(device_->GetDeviceRemovedReason()));
+        diagnostic_ += text;
+        last_present_result_ = hr;
+    }
 }

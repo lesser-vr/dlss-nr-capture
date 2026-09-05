@@ -1,4 +1,5 @@
 #include "frame_processor.hpp"
+#include "capture_power.hpp"
 #include "audio_output_checks.hpp"
 #include "audio_health.hpp"
 #include "device_refresh.hpp"
@@ -24,6 +25,12 @@
 
 namespace {
 int failures = 0;
+EXECUTION_STATE power_flags{};
+int power_calls{};
+bool power_fail{};
+EXECUTION_STATE WINAPI fake_power(EXECUTION_STATE flags) {
+    ++power_calls; power_flags = flags; return power_fail ? 0 : ES_CONTINUOUS;
+}
 void check(bool condition, const char* message) {
     if (!condition) { std::cerr << "FAIL: " << message << '\n'; ++failures; }
 }
@@ -36,6 +43,25 @@ VideoFrame solid(uint32_t width, uint32_t height, uint8_t value, uint64_t sequen
 }
 
 int wmain(int argc, wchar_t** argv) {
+    {
+        CapturePowerRequest request(fake_power);
+        check(request.update(true) && request.active(), "power request activates");
+        check(power_flags == (ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED), "power request flags");
+        request.update(true);
+        check(power_calls == 1, "unchanged power request does not reset idle timers");
+        power_fail = true;
+        check(!request.update(false) && request.active(), "failed release remains tracked");
+        power_fail = false;
+        check(request.update(false) && !request.active() && power_flags == ES_CONTINUOUS, "power request releases");
+        request.update(true);
+    }
+    check(power_flags == ES_CONTINUOUS, "power request destructor releases");
+    check(capture_requires_awake(true,true,false,1000,999), "live capture prevents sleep");
+    check(!capture_requires_awake(false,true,false,1000,999), "disabled power preference");
+    check(!capture_requires_awake(true,false,false,1000,999), "stopped capture allows sleep");
+    check(!capture_requires_awake(true,true,true,1000,999), "failed capture allows sleep");
+    check(!capture_requires_awake(true,true,false,3000,1000), "stalled capture releases");
+    check(!capture_requires_awake(true,true,false,1000,0), "no first frame allows sleep");
     check_audio_output(check);
     {
         const uint8_t pixels[] = {1,2,3,255, 4,5,6,255, 7,8,9,255, 10,11,12,255};

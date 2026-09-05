@@ -41,6 +41,7 @@ constexpr UINT auto_size_command = 49002;
 constexpr UINT diagnostics_command = 49003;
 constexpr UINT performance_command = 49004;
 constexpr UINT refresh_devices_command = 49005;
+constexpr UINT prevent_sleep_command = 49006;
 constexpr UINT passthrough_command = 50000;
 constexpr UINT motion_analysis_command = 50001;
 constexpr UINT history_overlay_command = 50002;
@@ -150,7 +151,9 @@ int App::run(HINSTANCE instance, int show_command)
             const std::wstring folder = std::wstring(root) + L"\\DlssNrCapture";
             CreateDirectoryW(folder.c_str(), nullptr);
             event_log_.set_path(folder + L"\\capture.log");
-            event_log_.append(L"Application started");
+            wchar_t executable[32768]{};
+            GetModuleFileNameW(nullptr, executable, 32768);
+            event_log_.append(L"Application started: " + std::wstring(executable));
         }
     }
     discover_capture_devices();
@@ -183,6 +186,7 @@ int App::run(HINSTANCE instance, int show_command)
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }
+    capture_power_.update(false);
     driver_call(window_, [&] { capture_->stop(); });
     driver_call(window_, [&] { audio_capture_->stop(); });
     stop_nr_worker();
@@ -232,6 +236,7 @@ void App::load_settings()
     if (read_dword(L"NrIntensity", value)) nr_intensity_percent_ = std::clamp(value, 25u, 100u);
     if (read_dword(L"NrWaitMs", value)) nr_wait_ms_ = value == 16 || value == 33 ? value : 2;
     if (read_dword(L"AlwaysOnTop", value)) always_on_top_ = value != 0;
+    if (read_dword(L"PreventCaptureSleep", value)) prevent_capture_sleep_ = value != 0;
     if (read_dword(L"AutoSizeToResolution", value)) auto_size_to_resolution_ = value != 0;
     if (read_dword(L"PerformanceOverlay", value)) performance_overlay_ = value != 0;
     RegCloseKey(key);
@@ -270,6 +275,7 @@ void App::save_settings()
     write_dword(L"NrIntensity", nr_intensity_percent_);
     write_dword(L"NrWaitMs", nr_wait_ms_);
     write_dword(L"AlwaysOnTop", always_on_top_ ? 1u : 0u);
+    write_dword(L"PreventCaptureSleep", prevent_capture_sleep_ ? 1u : 0u);
     write_dword(L"AutoSizeToResolution", auto_size_to_resolution_ ? 1u : 0u);
     write_dword(L"PerformanceOverlay", performance_overlay_ ? 1u : 0u);
     RegCloseKey(key);
@@ -328,6 +334,8 @@ void App::discover_capture_devices()
     AppendMenuW(processing_menu_, MF_STRING, history_overlay_command, L"Show rejected history");
     AppendMenuW(view_menu_, MF_STRING, fullscreen_command, L"Full screen (F11)");
     AppendMenuW(view_menu_, MF_STRING | (always_on_top_ ? MF_CHECKED : 0), always_on_top_command, L"Always on top");
+    AppendMenuW(view_menu_, MF_STRING | (prevent_capture_sleep_ ? MF_CHECKED : 0),
+                prevent_sleep_command, L"Prevent display sleep while capturing");
     AppendMenuW(view_menu_, MF_STRING | (auto_size_to_resolution_ ? MF_CHECKED : 0), auto_size_command, L"Size window to capture resolution");
     AppendMenuW(view_menu_, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(view_menu_, MF_STRING, diagnostics_command, L"Copy diagnostics to clipboard");
@@ -622,6 +630,16 @@ void App::set_always_on_top(bool enabled)
                       MF_BYCOMMAND | (enabled ? MF_CHECKED : MF_UNCHECKED));
     save_settings();
 }
+
+void App::update_capture_power()
+{
+    const bool required = capture_requires_awake(prevent_capture_sleep_, capture_expected_,
+        capture_failed_, GetTickCount64(), last_capture_frame_ms_.load());
+    if (!capture_power_.update(required)) {
+        if (!power_error_logged_) event_log_.append(L"Failed to update capture display/system power request");
+        power_error_logged_ = true;
+    } else power_error_logged_ = false;
+}
 void App::toggle_fullscreen()
 {
     const LONG_PTR style = GetWindowLongPtrW(window_, GWL_STYLE);
@@ -661,6 +679,7 @@ void App::start_capture_device(size_t index)
     capture_expected_ = false;
     worker_expected_ = false;
     ++capture_generation_;
+    capture_power_.update(false);
     driver_call(window_, [&] { capture_->stop(); });
     stop_nr_worker();
     active_mode_.reset();
@@ -761,6 +780,7 @@ void App::start_capture_frame_rate(size_t index)
     if (!reconnecting_capture_) capture_expected_ = false;
     capture_failed_ = false;
     worker_expected_ = false;
+    capture_power_.update(false);
     driver_call(window_, [&] { capture_->stop(); });
     stop_nr_worker();
     {
@@ -827,6 +847,7 @@ void App::set_motion_analysis(bool enabled)
 {
     if (motion_analysis_enabled_ == enabled) return;
     const std::optional<size_t> mode = active_mode_;
+    capture_power_.update(false);
     driver_call(window_, [&] { capture_->stop(); });
     processor_ = enabled ? create_motion_analysis_processor() : create_passthrough_processor();
     motion_analysis_enabled_ = enabled;
@@ -901,6 +922,7 @@ void App::ensure_capture_health()
     ++capture_recovery_attempts_;
     event_log_.append(L"Capture recovery attempt " + std::to_wstring(capture_recovery_attempts_));
     ++capture_generation_; // Ignore queued errors/frames belonging to the old session.
+    capture_power_.update(false);
     driver_call(window_, [&] { capture_->stop(); });
     worker_expected_ = false;
     stop_nr_worker();
@@ -1195,6 +1217,8 @@ void App::copy_diagnostics()
     report.add(L"Audio reconnect attempts", audio_recovery_attempts_);
     report.add(L"Last audio recovery error", audio_recovery_error_);
     report.add(L"Event log", event_log_.path());
+    report.add(L"Prevent capture sleep enabled", prevent_capture_sleep_ ? 1u : 0u);
+    report.add(L"Capture power request active", capture_power_.active() ? 1u : 0u);
     report.add(L"Processing EMA us", renderer_.worker_average_processing_us());
     report.add(L"Enable threshold us", policy.enable_us);
     report.add(L"Slow threshold us", policy.slow_us);
@@ -1287,8 +1311,11 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             capture_interrupted_ = capture_expected_ && capture_input_interrupted(
                 GetTickCount64(), capture_started_ms_, last_capture_frame_ms_.load(), capture_failed_);
             renderer_.set_capture_interrupted(capture_interrupted_);
+            update_capture_power();
             update_performance_overlay();
             if (capture_interrupted_) renderer_.redraw_idle();
+            if (auto diagnostic = renderer_.take_diagnostic(); !diagnostic.empty())
+                event_log_.append(diagnostic);
             ensure_capture_health();
             ensure_audio_health();
             ensure_nr_worker_health();
@@ -1310,6 +1337,9 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             capture_interrupted_ = capture_failed_;
             renderer_.set_capture_interrupted(capture_interrupted_);
             renderer_.render(*frame);
+            update_capture_power();
+            if (auto diagnostic = renderer_.take_diagnostic(); !diagnostic.empty())
+                event_log_.append(diagnostic);
             const uint64_t now = GetTickCount64();
             last_present_latency_ms_ = frame->arrival_tick_ms && now >= frame->arrival_tick_ms
                 ? now - frame->arrival_tick_ms : 0;
@@ -1410,6 +1440,12 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         }
         if (command == fullscreen_command) { toggle_fullscreen(); return 0; }
         if (command == always_on_top_command) { set_always_on_top(!always_on_top_); return 0; }
+        if (command == prevent_sleep_command) {
+            prevent_capture_sleep_ = !prevent_capture_sleep_;
+            CheckMenuItem(view_menu_, prevent_sleep_command, MF_BYCOMMAND |
+                (prevent_capture_sleep_ ? MF_CHECKED : MF_UNCHECKED));
+            update_capture_power(); save_settings(); return 0;
+        }
         if (command == auto_size_command) { set_auto_size_to_resolution(!auto_size_to_resolution_); return 0; }
         if (command == diagnostics_command) { copy_diagnostics(); return 0; }
         if (command == refresh_devices_command) { refresh_capture_devices(); return 0; }
@@ -1476,7 +1512,7 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     case WM_PAINT: {
         PAINTSTRUCT paint{}; BeginPaint(window, &paint); EndPaint(window, &paint); return 0;
     }
-    case WM_DESTROY: KillTimer(window, health_timer_id); PostQuitMessage(0); return 0;
+    case WM_DESTROY: capture_power_.update(false); KillTimer(window, health_timer_id); PostQuitMessage(0); return 0;
     default: break;
     }
     return DefWindowProcW(window, message, wparam, lparam);

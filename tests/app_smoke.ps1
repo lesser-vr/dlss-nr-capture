@@ -66,6 +66,10 @@ try {
     if ($labels -notcontains $expected) { throw "Menu missing: $expected" }
   }
   $view = [RegressionUi]::GetSubMenu($menu,$labels.IndexOf('View'))
+  Assert-MenuCommand $view 49006 $true
+  [void][RegressionUi]::SendMessage([IntPtr]$script:app.MainWindowHandle,0x111,[IntPtr]49006,[IntPtr]::Zero)
+  Assert-MenuCommand $view 49006 $false
+  if ((Get-ItemProperty -LiteralPath $keyPs).PreventCaptureSleep -ne 0) { throw 'Power preference not saved' }
   foreach ($command in @(49000,49001,49002,49003,49004,49005)) { Assert-MenuCommand $view $command $false }
   # Do not invoke the command: regression must preserve the user's clipboard.
   $label = [Text.StringBuilder]::new(128)
@@ -184,6 +188,7 @@ try {
   Assert-MenuCommand $restoredView 49002 $true
   Assert-MenuCommand $restoredView 49003 $false
   Assert-MenuCommand $restoredView 49004 $true
+  Assert-MenuCommand $restoredView 49006 $false
   $restoredAudioMenu = [RegressionUi]::GetSubMenu($restoredMenu,$labels.IndexOf('Audio capture'))
   Assert-MenuCommand $restoredAudioMenu 48012 $true
   if ((Get-ItemProperty -LiteralPath $keyPs).AudioDelayMs -ne 50) { throw 'Audio delay was not restored' }
@@ -240,7 +245,7 @@ try {
       $script:app.Refresh()
       if ($script:app.MainWindowTitle -match 'Live:.*capture reconnects 1') { $reconnected = $true; break }
     }
-    if (-not $reconnected) { throw 'Capture error did not reconnect to the prior device/mode' }
+    if (-not $reconnected) { throw "Capture error did not reconnect to the prior device/mode: $($script:app.MainWindowTitle)" }
     $afterReconnect = Get-ItemProperty -LiteralPath $keyPs
     foreach ($field in @('VideoDevice','VideoFormat','Width','Height','FpsNumerator','FpsDenominator','FlipVertical')) {
       if ($beforeReconnect.$field -ne $afterReconnect.$field) { throw "Capture reconnect changed setting: $field" }
