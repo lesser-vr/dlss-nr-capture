@@ -3,6 +3,7 @@ param(
  [switch]$GpuCapture,
  [switch]$ExpectCpu,
  [switch]$Transitions,
+ [switch]$CreativeTransitions,
  [string]$DeviceName='',
  [string]$AudioDeviceName='',
  [ValidateSet('NV12','P010','RGB24','RGB32','ARGB32','MJPG','YUY2','UYVY')][string]$Format='NV12',
@@ -29,6 +30,8 @@ public static class LiveNrProbe {
  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h,out uint pid);
  [DllImport("user32.dll",CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h,StringBuilder b,int n);
  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h,uint m,IntPtr w,IntPtr l);
+ [DllImport("user32.dll")] static extern IntPtr SendMessageTimeout(IntPtr h,uint m,IntPtr w,IntPtr l,uint flags,uint timeout,out UIntPtr result);
+ public static long State(IntPtr h){UIntPtr result;if(SendMessageTimeout(h,0x802E,IntPtr.Zero,IntPtr.Zero,2,1000,out result)==IntPtr.Zero)throw new Exception("State query timed out");return (long)result.ToUInt64();}
  [DllImport("user32.dll")] public static extern IntPtr GetMenu(IntPtr h);
  [DllImport("user32.dll")] public static extern IntPtr GetSubMenu(IntPtr h,int p);
  [DllImport("user32.dll")] public static extern int GetMenuItemCount(IntPtr h);
@@ -42,6 +45,13 @@ function Read-Title {
 }
 function Post-Command([uint32]$command) {
  if(-not [LiveNrProbe]::PostMessage($window,0x111,[IntPtr]$command,[IntPtr]::Zero)){throw 'Could not post menu command'}
+}
+function Key([int]$key,[bool]$down=$true) { [void][LiveNrProbe]::PostMessage($window, $(if($down){0x100}else{0x101}),[IntPtr]$key,[IntPtr]::Zero) }
+function Tap([int]$key) { Key $key; Key $key $false }
+function Wait-State([string]$name,[int]$mask,[int]$expected) {
+ $wait=[Diagnostics.Stopwatch]::StartNew()
+ while($wait.Elapsed.TotalSeconds -lt 20){$null=Read-Title;$state=[LiveNrProbe]::State($window);if(($state -band $mask) -eq $expected){Write-Host "$name passed (state $state)";return};Start-Sleep -Milliseconds 100}
+ throw "$name failed; last state $state"
 }
 function Select-Menu([int]$position,[string]$label) {
  $m=[LiveNrProbe]::GetSubMenu([LiveNrProbe]::GetMenu($window),$position)
@@ -134,11 +144,42 @@ try {
   Wait-Path 'application resume' 'graphics recoveries 2' @{VideoFormat='NV12';Width=1920;Height=1080;AudioAutoSync=1}
   $title=Read-Title
  }
+ if($CreativeTransitions) {
+  Post-Command 51502;Wait-Path 'Tone 50' 'GPU native' @{NrTone=50}
+  Post-Command 51512;Wait-Path 'Structure 50' 'GPU native' @{NrStructure=50}
+  Post-Command 51523;Wait-Path 'NR 75 percent' 'GPU native' @{NrScale=75}
+  Post-Command 51522;Wait-Path 'NR 50 percent' 'GPU native' @{NrScale=50}
+  Post-Command 51534;Wait-Path 'preserve color 100' 'GPU native' @{NrColorPreserve=100}
+  Post-Command 51540;Wait-Path 'protect highlights' 'GPU native' @{NrHighlightGuard=1}
+  Post-Command 51541;Wait-Path 'creative defaults' 'GPU native' @{NrTone=100;NrStructure=100;NrScale=100;NrColorPreserve=0;NrHighlightGuard=0}
+  Tap 120;Wait-State 'F9 paired comparison' 49 49
+  Key 9;Wait-State 'Tab original peek' 2 2
+  Key 9 $false;Wait-State 'Tab release' 2 0
+  Tap 119;Wait-State 'F8 frame hold' 8 8
+  Post-Command 51005;Wait-State 'held 2x zoom' 3840 512
+  Post-Command 51005;Wait-State 'held 4x zoom' 3840 1024
+  Post-Command 51005;Wait-State 'held 1x zoom' 3840 256
+  Post-Command 51003;Wait-State 'swap sides' 4 4
+  Key 9;Wait-State 'held Tab peek' 2 2
+  [void][LiveNrProbe]::PostMessage($window,0x1C,[IntPtr]::Zero,[IntPtr]::Zero)
+  Wait-State 'focus loss releases peek' 2 0;Key 9 $false
+  Tap 119;Wait-State 'F8 resume' 8 0
+  Tap 121;Wait-State 'F10 off clears active NR' 32 0
+  Tap 9;Wait-State 'NR OFF Tab guidance' 64 64
+  Tap 120;Wait-State 'F9 exits comparison' 1 0
+  Tap 120;Wait-State 'F9 enables NR and comparison' 49 49
+  Tap 119;Wait-State 'hold before settings change' 8 8
+  Post-Command 51523;Wait-State 'settings release hold' 8 0
+  Wait-Path '75 percent comparison recovers' 'GPU native' @{NrScale=75;NrEnabled=1}
+  Post-Command 51541;Wait-Path 'final defaults' 'GPU native' @{NrScale=100}
+  Tap 120;Wait-State 'final live view' 1 0
+  $title=Read-Title
+ }
  [void][LiveNrProbe]::PostMessage($window,0x10,[IntPtr]::Zero,[IntPtr]::Zero)
  if($AudioDeviceName -and ($title -notmatch 'audio packets [1-9][0-9]*' -or $title -match 'Audio reconnect pending')){throw "Audio capture/sync did not remain active: $title"}
  if(-not $app.WaitForExit(5000)){throw 'Normal shutdown exceeded 5 seconds'}
  if($app.ExitCode -ne 0){throw "Shutdown failed: $($app.ExitCode)"}
- [pscustomobject]@{mode='background_hardware_capture';gpu_capture=[bool]$GpuCapture;initial_seconds=$Seconds;elapsed_seconds=[Math]::Round($clock.Elapsed.TotalSeconds,2);transitions=[bool]$Transitions;last_title=$title;exit_code=$app.ExitCode}|ConvertTo-Json
+ [pscustomobject]@{mode='background_hardware_capture';gpu_capture=[bool]$GpuCapture;initial_seconds=$Seconds;elapsed_seconds=[Math]::Round($clock.Elapsed.TotalSeconds,2);transitions=[bool]$Transitions;creative_transitions=[bool]$CreativeTransitions;last_title=$title;exit_code=$app.ExitCode}|ConvertTo-Json
 } finally {
  if($app -and -not $app.HasExited){$app.Kill();[void]$app.WaitForExit(5000)}
  if(Test-Path -LiteralPath $keyPs){Remove-Item -LiteralPath $keyPs -Recurse -Force}

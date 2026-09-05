@@ -280,8 +280,8 @@ int wmain(int argc, wchar_t** argv) {
     check(worker_output_release_key(true) == 1, "successful processing publishes output");
     const auto info_style = overlay_palette(OverlayMessageStyle::information);
     const auto error_style = overlay_palette(OverlayMessageStyle::error);
-    check(info_style.background_rgb == 0 && info_style.text_rgb == 0xFFFF00 &&
-          info_style.background_opacity == 1.0f, "general overlay uses black and yellow");
+    check(info_style.background_rgb == 0 && info_style.text_rgb == 0x76B900 &&
+          info_style.background_opacity == 1.0f, "general overlay uses black and NVIDIA green");
     check(error_style.background_rgb == 0xA81919 && error_style.text_rgb == 0xFFFFFF &&
           error_style.background_opacity == 0.88f, "error overlay preserves TOO SLOW style");
     NrWarmupGate warmup;
@@ -326,7 +326,7 @@ int wmain(int argc, wchar_t** argv) {
     check(nr_notification_opacity(1250) == 0.5f, "NR notification fade midpoint");
     check(nr_notification_opacity(1500) == 0.0f, "NR notification expires after 1.5 seconds");
     check(nr_notification_opacity(5000) == 0.0f, "NR notification stays expired");
-    check(nr_worker_protocol_version == 8, "worker protocol version changed unexpectedly");
+    check(nr_worker_protocol_version == 9, "worker protocol version changed unexpectedly");
     WorkerTemporalState state{};
     check(state.magic == nr_worker_protocol_magic, "protocol magic default");
     check(state.byte_size == sizeof(WorkerTemporalState), "protocol byte size default");

@@ -88,7 +88,7 @@ set_target_properties(dlss-nr-adapter-sample PROPERTIES OUTPUT_NAME "dlss-nr-ada
 add_executable(dlss-nr-worker src/worker_main.cpp)
 target_compile_definitions(dlss-nr-worker PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(dlss-nr-worker PRIVATE /W4 /permissive- /EHsc /utf-8)
-target_link_libraries(dlss-nr-worker PRIVATE d3d11 dxgi)
+target_link_libraries(dlss-nr-worker PRIVATE d3d11 dxgi d3dcompiler)
 
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT dlss-nr-capture)
 
@@ -103,6 +103,13 @@ target_compile_definitions(dlss-nr-benchmark PRIVATE UNICODE _UNICODE NOMINMAX W
 target_compile_options(dlss-nr-benchmark PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(dlss-nr-benchmark PRIVATE d3d11 dxgi mfplat mfreadwrite mfuuid ole32)
 if(BUILD_TESTING)
+    add_executable(dlss-nr-composition-test tests/nr_composition.cpp)
+    target_include_directories(dlss-nr-composition-test PRIVATE src)
+    target_compile_definitions(dlss-nr-composition-test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_options(dlss-nr-composition-test PRIVATE /W4 /permissive- /EHsc /utf-8)
+    target_link_libraries(dlss-nr-composition-test PRIVATE d3d11 d3dcompiler)
+    add_test(NAME regression.nr-composition COMMAND dlss-nr-composition-test)
+    set_tests_properties(regression.nr-composition PROPERTIES TIMEOUT 30)
     add_executable(dlss-nr-copy-timing tests/copy_timing.cpp)
     target_include_directories(dlss-nr-copy-timing PRIVATE src)
     target_compile_definitions(dlss-nr-copy-timing PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -176,6 +183,7 @@ if(BUILD_TESTING)
     add_custom_target(regression
         COMMAND "${CMAKE_CTEST_COMMAND}" -C $<CONFIG> --output-on-failure
         DEPENDS dlss-nr-capture dlss-nr-worker dlss-nr-adapter-sample
+                dlss-nr-composition-test
                 dlss-nr-adapter-bridge dlss5nr-runtime-bridge dlss5nr-caller-shim
                 dlss-nr-regression-core dlss-nr-gpu-input-test dlss-nr-gpu-capture-test dlss-nr-worker-pipeline-test dlss-nr-benchmark dlss-nr-quality-compare
         USES_TERMINAL)

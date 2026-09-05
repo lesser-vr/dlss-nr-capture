@@ -45,3 +45,9 @@ implementation. Flow-default decision, nine-suite coverage and limitations:
   tests are ready; physical input/output calibration is excluded at the user's
   request. GPU-native capture remains opt-in after the default
   review. See [calibration readiness and default decision](av-calibration-gpu-default.md).
+- Experimental creative controls now expose Tone/Structure, 75/50% NR processing,
+  residual color/highlight protection and held-frame comparison with centered
+  zoom. Both GPU-flow builds passed all 10 regression suites, including 15
+  numerical composition cases; short hardware NR/UI transitions passed. Subjective
+  quality and sustained performance remain unvalidated. See
+  [implementation notes](nr-creative-controls.md) and [test policy](regression-policy.md).
