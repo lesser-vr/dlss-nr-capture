@@ -22,6 +22,8 @@ struct NvofFlowFrame {
     uint32_t height = 0;
     uint32_t grid = 0;
     std::vector<int16_t> xy;
+    // Borrowed until the next prepare/release; consumer must finish its copy.
+    ID3D11Texture2D* gpu_texture = nullptr;
 };
 
 // Prepare flow from a BGRA texture on the caller''s D3D11 device.
@@ -37,7 +39,8 @@ bool NvofPrepareFrame(
     uint32_t height,
     bool reset,
     NvofFlowFrame& out,
-    std::string& error);
+    std::string& error,
+    bool gpu_only = false);
 
 // Releases the active OFA session and its D3D11 textures, but keeps no contract state.
 void NvofReleaseSession();

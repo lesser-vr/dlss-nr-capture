@@ -110,6 +110,11 @@ static CreateFeatureFn g_core_create = nullptr;
 static EvaluateFeatureFn g_core_eval = nullptr;
 static ReleaseFeatureFn g_core_release = nullptr;
 static ShutdownFn g_core_shutdown = nullptr;
+static ShutdownFn g_nr_shutdown = nullptr;
+using ShimShutdownFn = NGXResult(__cdecl*)(void*);
+static ShimShutdownFn g_shim_shutdown = nullptr;
+static bool g_core_session = false;
+static bool g_nr_session = false;
 static SnippetInitFn g_nr_init = nullptr;
 static CreateFeatureFn g_nr_create = nullptr;
 static EvaluateFeatureFn g_nr_eval = nullptr;
@@ -132,6 +137,9 @@ static NGXHandle* g_feature = nullptr;
 static ComPtr<ID3D12Resource> g_color;
 static ComPtr<ID3D12Resource> g_output;
 static SharedGpuInput g_shared_input;
+#if defined(DLSS_NR_EXPERIMENTAL_GPU_FLOW)
+static SharedGpuInput g_shared_flow;
+#endif
 static ComPtr<ID3D12Resource> g_readback;
 static ComPtr<ID3D12Resource> g_correction_target;
 static ComPtr<ID3D12Resource> g_rejection_mask_upload;
@@ -396,22 +404,38 @@ static float HalfToFloat(uint16_t h) {
 static bool EnsureMotionVectorPipeline() {
     if (g_mvec_pipeline && g_mvec_root_signature) return true;
     static constexpr char shader_source[] = R"(
+#ifdef GPU_FLOW
+Texture2D<int2> coarse_flow : register(t0);
+#else
 StructuredBuffer<uint> coarse_flow : register(t0);
+#endif
 RWTexture2D<float2> motion_vectors : register(u0);
 cbuffer Dimensions : register(b0) { uint width; uint height; uint flow_width; uint flow_height; };
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
     if (id.x >= width || id.y >= height) return;
+    if (flow_width == 0 || flow_height == 0) { motion_vectors[id.xy] = 0; return; }
     uint cx = min((id.x * flow_width) / width, flow_width - 1);
     uint cy = min((id.y * flow_height) / height, flow_height - 1);
+#ifdef GPU_FLOW
+    int2 displacement = coarse_flow.Load(int3(cx, cy, 0));
+    int dx = displacement.x;
+    int dy = displacement.y;
+#else
     uint packed = coarse_flow[cy * flow_width + cx];
     int dx = (int)(packed << 16) >> 16;
     int dy = (int)packed >> 16;
+#endif
     motion_vectors[id.xy] = float2((float)dx / 32.0 / width,
                                    (float)dy / 32.0 / height);
 })";
     ComPtr<ID3DBlob> shader, errors;
-    HRESULT hr = D3DCompile(shader_source, sizeof(shader_source) - 1, nullptr, nullptr, nullptr,
+    const D3D_SHADER_MACRO* macros = nullptr;
+#if defined(DLSS_NR_EXPERIMENTAL_GPU_FLOW)
+    const D3D_SHADER_MACRO gpu_macros[] = {{"GPU_FLOW", "1"}, {nullptr, nullptr}};
+    macros = gpu_macros;
+#endif
+    HRESULT hr = D3DCompile(shader_source, sizeof(shader_source) - 1, nullptr, macros, nullptr,
                             "main", "cs_5_0", 0, 0, &shader, &errors);
     if (FAILED(hr)) { SetError("Motion-vector compute shader compilation failed: 0x%08X", static_cast<unsigned>(hr)); return false; }
 
@@ -469,7 +493,16 @@ static bool CreateMotionVectorDescriptors() {
     srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srv.Buffer.NumElements = g_flow_capacity_width * g_flow_capacity_height;
     srv.Buffer.StructureByteStride = sizeof(uint32_t);
+#if defined(DLSS_NR_EXPERIMENTAL_GPU_FLOW)
+    srv = {};
+    srv.Format = DXGI_FORMAT_R16G16_SINT;
+    srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    srv.Texture2D.MipLevels = 1;
+    g_device->CreateShaderResourceView(g_shared_flow.resource(), &srv, handle);
+#else
     g_device->CreateShaderResourceView(g_mvec_upload.Get(), &srv, handle);
+#endif
     handle.ptr += stride;
     D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
     uav.Format = DXGI_FORMAT_R16G16_FLOAT;
@@ -745,12 +778,19 @@ static bool RecordCorrectionOutput(const uint8_t* rejection_mask, int mask_colum
 }
 
 static bool UploadMotionVectorTexture(const NvofFlowFrame* flow, bool execute_now) {
-    if (!g_mvec || !g_mvec_upload || !g_mvec_descriptors ||
+    if (!g_mvec || !g_mvec_descriptors ||
         g_width == 0 || g_height == 0) {
         SetError("Motion-vector resources are not allocated");
         return false;
     }
 
+#if defined(DLSS_NR_EXPERIMENTAL_GPU_FLOW)
+    const UINT flow_width = flow && flow->has_flow ? flow->width : 0;
+    const UINT flow_height = flow && flow->has_flow ? flow->height : 0;
+    auto flow_read = Barrier(g_shared_flow.resource(), D3D12_RESOURCE_STATE_COMMON,
+                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    g_cmd->ResourceBarrier(1, &flow_read);
+#else
     void* mapped = nullptr;
     HRESULT hr = g_mvec_upload->Map(0, nullptr, &mapped);
     if (FAILED(hr) || !mapped) {
@@ -773,6 +813,7 @@ static bool UploadMotionVectorTexture(const NvofFlowFrame* flow, bool execute_no
     } else
         memset(mapped, 0, static_cast<size_t>(g_mvec_total_bytes));
     g_mvec_upload->Unmap(0, nullptr);
+#endif
 
     auto to_write = Barrier(
         g_mvec.Get(),
@@ -790,6 +831,11 @@ static bool UploadMotionVectorTexture(const NvofFlowFrame* flow, bool execute_no
     const UINT dimensions[] = {g_width, g_height, flow_width, flow_height};
     g_cmd->SetComputeRoot32BitConstants(2, 4, dimensions, 0);
     g_cmd->Dispatch((g_width + 7) / 8, (g_height + 7) / 8, 1);
+#if defined(DLSS_NR_EXPERIMENTAL_GPU_FLOW)
+    auto flow_release = Barrier(g_shared_flow.resource(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                               D3D12_RESOURCE_STATE_COMMON);
+    g_cmd->ResourceBarrier(1, &flow_release);
+#endif
 
     auto to_read = Barrier(
         g_mvec.Get(),
@@ -817,6 +863,9 @@ static void ReleaseFeatureAndResources() {
     g_correction_descriptors.Reset(); g_correction_rtv_heap.Reset();
     g_color.Reset(); g_output.Reset(); g_shared_input.reset(); g_readback.Reset();
     g_mvec.Reset(); g_mvec_upload.Reset(); g_mvec_descriptors.Reset();
+#if defined(DLSS_NR_EXPERIMENTAL_GPU_FLOW)
+    g_shared_flow.reset();
+#endif
     g_width = g_height = g_row_pitch = 0;
     g_total_bytes = 0;
     g_mvec_total_bytes = 0;
@@ -856,9 +905,16 @@ static bool AllocateFrameResources(UINT w, UINT h, bool use_motion_vectors) {
         g_flow_capacity_height = (h + 1) / 2;
         g_mvec_total_bytes = static_cast<UINT64>(g_flow_capacity_width) *
             g_flow_capacity_height * sizeof(uint32_t);
+#if defined(DLSS_NR_EXPERIMENTAL_GPU_FLOW)
+        if (FAILED(g_shared_flow.create(g_device.Get(), g_flow_capacity_width,
+                                       g_flow_capacity_height, DXGI_FORMAT_R16G16_TYPELESS))) {
+            SetError("Failed to create shared coarse-flow texture"); return false;
+        }
+#else
         g_mvec_upload = CreateLinearBuffer(
             g_mvec_total_bytes, D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ);
         if (!g_mvec_upload) { SetError("Failed to create motion-vector upload buffer"); return false; }
+#endif
         if (!CreateMotionVectorDescriptors()) return false;
 
         // Feature creation always starts with a defined zero-MV resource. The
@@ -994,19 +1050,21 @@ static bool LoadNGX() {
     g_nr_create = reinterpret_cast<CreateFeatureFn>(GetProcAddress(g_nr_mod, "NVSDK_NGX_D3D12_CreateFeature"));
     g_nr_eval = reinterpret_cast<EvaluateFeatureFn>(GetProcAddress(g_nr_mod, "NVSDK_NGX_D3D12_EvaluateFeature"));
     g_nr_release = reinterpret_cast<ReleaseFeatureFn>(GetProcAddress(g_nr_mod, "NVSDK_NGX_D3D12_ReleaseFeature"));
+    g_nr_shutdown = reinterpret_cast<ShutdownFn>(GetProcAddress(g_nr_mod, "NVSDK_NGX_D3D12_Shutdown"));
 
     g_shim_init = reinterpret_cast<ShimInitFn>(GetProcAddress(g_shim_mod, "DLSSNR_CallInit"));
     g_shim_create = reinterpret_cast<ShimCreateFn>(GetProcAddress(g_shim_mod, "DLSSNR_CallCreate"));
     g_shim_eval = reinterpret_cast<ShimEvaluateFn>(GetProcAddress(g_shim_mod, "DLSSNR_CallEvaluate"));
     g_shim_release = reinterpret_cast<ShimReleaseFn>(GetProcAddress(g_shim_mod, "DLSSNR_CallRelease"));
+    g_shim_shutdown = reinterpret_cast<ShimShutdownFn>(GetProcAddress(g_shim_mod, "DLSSNR_CallShutdown"));
 
     if (!g_core_init_ext || !g_alloc_params || !g_core_create || !g_core_eval || !g_core_release || !g_core_shutdown) {
         SetError("Required NGX core exports are missing"); return false;
     }
-    if (!g_nr_init || !g_nr_create || !g_nr_eval || !g_nr_release) {
+    if (!g_nr_init || !g_nr_create || !g_nr_eval || !g_nr_release || !g_nr_shutdown) {
         SetError("Required DLSSNR exports are missing from nvngx_dlssnr.dll"); return false;
     }
-    if (!g_shim_init || !g_shim_create || !g_shim_eval || !g_shim_release) {
+    if (!g_shim_init || !g_shim_create || !g_shim_eval || !g_shim_release || !g_shim_shutdown) {
         SetError("Required caller shim exports are missing"); return false;
     }
     return true;
@@ -1033,6 +1091,7 @@ static bool InitNGXSession() {
         }
     }
     if (!core_ok) { SetError("NGX core initialization failed for API versions 0x13..0x20"); return false; }
+    g_core_session = true;
 
     NGXResult sr = g_shim_init(reinterpret_cast<void*>(g_nr_init), APP_ID, g_runtime_dir.c_str(), g_device.Get(), 0x15, &fci);
     if (sr != NGX_SUCCESS) {
@@ -1044,6 +1103,7 @@ static bool InitNGXSession() {
         return false;
     }
 
+    g_nr_session = true;
     NGXResult ar = g_alloc_params(&g_params);
     if (ar != NGX_SUCCESS || !g_params) {
         SetError("NVSDK_NGX_D3D12_AllocateParameters failed: 0x%08X", static_cast<unsigned>(ar));
@@ -1055,12 +1115,19 @@ static bool InitNGXSession() {
 static void ShutdownUnlocked() {
     ReleaseFeatureAndResources();
     NvofShutdown();
-    if (g_core_shutdown) g_core_shutdown();
+    if (g_nr_session && g_nr_shutdown && g_shim_shutdown)
+        g_shim_shutdown(reinterpret_cast<void*>(g_nr_shutdown));
+    g_nr_session = false;
+    if (g_core_session && g_core_shutdown) g_core_shutdown();
+    g_core_session = false;
     g_params = nullptr;
     g_input_descriptors.Reset(); g_input_pipeline.Reset(); g_input_root_signature.Reset();
     g_correction_descriptors.Reset(); g_correction_rtv_heap.Reset();
     g_correction_target.Reset(); g_rejection_mask_upload.Reset();
     g_correction_pipeline.Reset(); g_correction_root_signature.Reset();
+    // Release every global GPU object before FreeLibrary invokes static
+    // destructors under the Windows loader lock.
+    g_mvec_pipeline.Reset(); g_mvec_root_signature.Reset();
     g_device.Reset(); g_adapter.Reset(); g_queue.Reset(); g_cmd_alloc.Reset(); g_cmd.Reset(); g_fence.Reset();
     if (g_shim_mod) FreeLibrary(g_shim_mod);
     if (g_nr_mod) FreeLibrary(g_nr_mod);
@@ -1074,6 +1141,8 @@ static void ShutdownUnlocked() {
     g_core_eval = nullptr;
     g_core_release = nullptr;
     g_core_shutdown = nullptr;
+    g_nr_shutdown = nullptr;
+    g_shim_shutdown = nullptr;
     g_nr_init = nullptr;
     g_nr_create = nullptr;
     g_nr_eval = nullptr;
@@ -1210,9 +1279,13 @@ __declspec(dllexport) int __cdecl dlss5nr_process(
     if (use_motion_vectors) {
         NvofFlowFrame flow;
         std::string of_error;
+        bool gpu_flow = false;
+#if defined(DLSS_NR_EXPERIMENTAL_GPU_FLOW)
+        gpu_flow = true;
+#endif
         if (!NvofPrepareFrame(g_adapter.Get(), input_device, input_context,
                 input_texture, static_cast<UINT>(width), static_cast<UINT>(height),
-                reset != 0, flow, of_error)) {
+                reset != 0, flow, of_error, gpu_flow)) {
             SetError("%s", of_error.c_str());
             CopyError(err, err_cap);
             return 0;
@@ -1220,6 +1293,15 @@ __declspec(dllexport) int __cdecl dlss5nr_process(
         const auto flow_end = TimingClock::now();
         g_timings.optical_flow_us = ElapsedUs(flow_start, flow_end);
         const auto motion_start = flow_end;
+#if defined(DLSS_NR_EXPERIMENTAL_GPU_FLOW)
+        if (flow.has_flow) {
+            const HRESULT hr = g_shared_flow.copy_from(g_device.Get(), input_device, input_context, flow.gpu_texture);
+            if (FAILED(hr)) {
+                SetError("Shared GPU flow copy failed: 0x%08X", static_cast<unsigned>(hr));
+                CopyError(err, err_cap); return 0;
+            }
+        }
+#endif
         // First frame: no previous image exists, so this deliberately writes zero
         // MVs. Later frames upload NVOFA current->previous optical flow.
         if (!UploadMotionVectorTexture(flow.has_flow ? &flow : nullptr, false)) {

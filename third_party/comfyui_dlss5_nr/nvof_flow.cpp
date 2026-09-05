@@ -370,7 +370,7 @@ bool NvofPrepareFrame(
     uint32_t height,
     bool reset,
     NvofFlowFrame& out,
-    std::string& error) {
+    std::string& error, bool gpu_only) {
 
     out = NvofFlowFrame{};
     error.clear();
@@ -419,6 +419,13 @@ bool NvofPrepareFrame(
         return false;
     }
 
+    if (gpu_only) {
+        out.has_flow = true;
+        out.width = g_ofa.flow_width; out.height = g_ofa.flow_height; out.grid = kGrid;
+        out.gpu_texture = g_ofa.flow.Get();
+        g_ofa.current ^= 1;
+        return true; // Consumer performs bounded GPU-copy synchronization.
+    }
     // Copy to staging + Map is the synchronization point for the private D3D11
     // device. D3D11 NVOF handles device synchronization internally.
     g_ofa.context->CopyResource(g_ofa.flow_staging.Get(), g_ofa.flow.Get());

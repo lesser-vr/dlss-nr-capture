@@ -1,5 +1,6 @@
 #include "shared_gpu_input.hpp"
 #include "nr_adapter_api.hpp"
+#include "blackout_probe.hpp"
 #include <dxgi1_4.h>
 #include <iostream>
 #include <vector>
@@ -27,6 +28,7 @@ int wmain(int argc, wchar_t** argv) {
         throw_if_failed(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0,
             IID_PPV_ARGS(&device12)), "Create D3D12");
         if (nr) {
+            for (int cycle = 0; cycle < 3; ++cycle) {
             HMODULE module = LoadLibraryExW(argv[1], nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
             if (!module) throw std::runtime_error("Load NR adapter");
             auto get = reinterpret_cast<NrAdapterGetApi>(GetProcAddress(module, "DlssNrAdapterGetApi"));
@@ -62,6 +64,8 @@ int wmain(int argc, wchar_t** argv) {
                 }
             }
             api->shutdown(); FreeLibrary(module);
+            std::cout << "NR unload/reload cycle " << cycle + 1 << " complete\n";
+            }
             std::cout << "NR shared input probe passed (synthetic frames, not visual quality verification)\n";
             return 0;
         }
@@ -77,13 +81,36 @@ int wmain(int argc, wchar_t** argv) {
         ComPtr<ID3D12Fence> fence;
         throw_if_failed(device12->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)), "Create fence");
         UINT64 signal = 0;
+        {
+            BlackoutProbe probe;
+            D3D11_TEXTURE2D_DESC desc{};
+            desc.Width = 12; desc.Height = 12; desc.ArraySize = desc.MipLevels = 1;
+            desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM; desc.SampleDesc.Count = 1;
+            ComPtr<ID3D11Texture2D> output;
+            throw_if_failed(device11->CreateTexture2D(&desc, nullptr, &output), "Create probe fixture");
+            for (UINT test = 0; test < 4; ++test) {
+                std::vector<uint32_t> pixels(144, test & 1 ? 0xff000000 : 0xffffffff);
+                std::vector<uint32_t> input(144, test & 2 ? 0xff000000 : 0xffffffff);
+                context->UpdateSubresource(output.Get(), 0, nullptr, pixels.data(), 48, 0);
+                probe.submit(device11.Get(), context.Get(), output.Get(),
+                    reinterpret_cast<const uint8_t*>(input.data()), input.size() * 4, 12, 12, true, 1000 + test * 1000);
+                context->Flush();
+                std::optional<BlackoutSample> sample;
+                const auto deadline = GetTickCount64() + 3000;
+                while (!(sample = probe.poll(context.Get())) && GetTickCount64() < deadline) Sleep(1);
+                if (!sample || sample->source_dark != !!(test & 2) || sample->output_dark != !!(test & 1) || !sample->nr_active)
+                    throw std::runtime_error("Blackout probe classification or freshness failed");
+            }
+        }
         SharedGpuInput shared;
+        for (const auto format : {DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16_SINT})
         for (const UINT width : {17u, 64u}) {
             const UINT height = 9;
-            throw_if_failed(shared.create(device12.Get(), width, height), "Create shared input");
+            throw_if_failed(shared.create(device12.Get(), width, height,
+                format == DXGI_FORMAT_R16G16_SINT ? DXGI_FORMAT_R16G16_TYPELESS : format), "Create shared input");
             D3D11_TEXTURE2D_DESC desc{};
             desc.Width = width; desc.Height = height; desc.MipLevels = 1; desc.ArraySize = 1;
-            desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM; desc.SampleDesc.Count = 1;
+            desc.Format = format; desc.SampleDesc.Count = 1;
             ComPtr<ID3D11Texture2D> source;
             throw_if_failed(device11->CreateTexture2D(&desc, nullptr, &source), "Create source");
             D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};

@@ -8,15 +8,18 @@
 // COMMON before the next copy or destruction. No CPU pixel mapping is involved.
 class SharedGpuInput {
 public:
-    HRESULT create(ID3D12Device* device, UINT width, UINT height) {
+    HRESULT create(ID3D12Device* device, UINT width, UINT height,
+                   DXGI_FORMAT format = DXGI_FORMAT_B8G8R8A8_UNORM) {
         reset();
         D3D12_RESOURCE_DESC desc{};
         desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
         desc.Width = width; desc.Height = height;
         desc.DepthOrArraySize = 1; desc.MipLevels = 1;
-        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.Format = format;
         desc.SampleDesc.Count = 1;
         desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+        if (format == DXGI_FORMAT_R16G16_TYPELESS)
+            desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
         D3D12_HEAP_PROPERTIES heap{};
         heap.Type = D3D12_HEAP_TYPE_DEFAULT;
         return device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_SHARED, &desc,
@@ -30,8 +33,10 @@ public:
         D3D11_TEXTURE2D_DESC source_desc{};
         source->GetDesc(&source_desc);
         const auto desc = resource_->GetDesc();
+        const bool compatible_format = source_desc.Format == desc.Format ||
+            (source_desc.Format == DXGI_FORMAT_R16G16_SINT && desc.Format == DXGI_FORMAT_R16G16_TYPELESS);
         if (source_desc.Width != desc.Width || source_desc.Height != desc.Height ||
-            source_desc.Format != desc.Format || source_desc.SampleDesc.Count != 1 ||
+            !compatible_format || source_desc.SampleDesc.Count != 1 ||
             source_desc.ArraySize != 1 || source_desc.MipLevels != 1) return E_INVALIDARG;
         if (!texture_) {
             ComPtr<ID3D11Device1> device1;
