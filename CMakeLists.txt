@@ -103,6 +103,10 @@ target_compile_definitions(dlss-nr-benchmark PRIVATE UNICODE _UNICODE NOMINMAX W
 target_compile_options(dlss-nr-benchmark PRIVATE /W4 /permissive- /EHsc /utf-8)
 target_link_libraries(dlss-nr-benchmark PRIVATE d3d11 dxgi mfplat mfreadwrite mfuuid ole32)
 if(BUILD_TESTING)
+    add_executable(dlss-nr-copy-timing tests/copy_timing.cpp)
+    target_include_directories(dlss-nr-copy-timing PRIVATE src)
+    target_compile_definitions(dlss-nr-copy-timing PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(dlss-nr-copy-timing PRIVATE d3d11)
     # Manual enumeration probe: never silently changes the mode under test.
     add_executable(dlss-nr-capture-modes tests/capture_modes.cpp src/capture_engine.cpp)
     target_include_directories(dlss-nr-capture-modes PRIVATE src)
