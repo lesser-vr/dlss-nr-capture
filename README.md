@@ -323,3 +323,23 @@ Off 또는 다른 입력을 선택하면 이전 복구 대상은 취소합니다
 공개 실행 파일·브리지·라이선스와 SHA-256 목록만 포함하며 독점 런타임과 게임 영상은
 제외합니다. 원본 파일/런타임 해시가 바뀌지 않았는지도 검사합니다. 새 Windows PC의
 Visual C++ 런타임 설치와 실제 GPU/캡쳐카드 호환성 확인은 별도입니다.
+
+## 종료 검증·암전 진단
+
+View > Prevent display sleep while capturing 옵션은 기본 ON이며 선택값을 저장합니다.
+프레임 수신 중 화면 꺼짐과 자동 절전을 방지하고, 옵션 OFF·캡쳐 중단·앱 종료 시
+해제합니다. 프레임이 2초 이상 끊겨도 해제됩니다. 캡쳐카드가 보내는 무신호 화면은
+정상 프레임으로 취급합니다. Windows 전원 설정은 변경하지 않으며 사용자가 직접
+선택한 절전은 막지 않습니다. 이 옵션은 GPU·케이블 오류에 의한 암전 해결책은 아닙니다.
+구현은 Windows의 [SetThreadExecutionState](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-setthreadexecutionstate)를 사용합니다.
+
+tools/check-nr-shutdown.ps1에 ReleaseDir와 새로운 OutputDir를 지정하면 실제 NR을
+temporal ON/OFF로 반복 실행하고 강제 종료가 필요하면 실패합니다. 호환 GPU와
+사용자 제공 NR DLL이 필요하며 일반 CI에는 포함되지 않습니다.
+
+업데이트된 앱은 capture.log에 실행 경로, 화면 표시 오류, 원본/출력의 어두운
+표본 여부를 기록합니다. 초당 9개 지점만 비차단 방식으로 검사하며 영상은 저장하지
+않습니다. 정상적인 게임 암전도 같은 값이 나올 수 있어 자동 오류 판정은 하지 않습니다.
+재현 시 발생 시각, 소리 지속 여부, 메뉴/오버레이 표시 여부, F10 전환 결과를 함께
+확인하세요. GPU 직접 모션 벡터 전송 실험과 측정 결과는
+[종료·GPU·암전 조사](docs/shutdown-gpu-blackout.md)에 정리했습니다.

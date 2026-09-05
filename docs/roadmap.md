@@ -16,3 +16,13 @@ Final validation: all six regression suites passed. Public ZIP packaging was
 executed against the deployed build; proprietary runtime SHA-256 was unchanged.
 Actual NR file-capture checks completed with no processing failures, but still
 needed the existing bounded post-report cleanup for stalled runtime shutdown.
+
+## Post-beta follow-up
+
+- NR shutdown: paired snippet shutdown and explicit global GPU resource cleanup
+  added; repeated actual NR runs now exit without forced cleanup.
+- GPU optimization phase 2: opt-in GPU-only coarse-flow handoff implemented and
+  measured. Default OFF; this is not GPU-native capture or multi-buffering.
+- Long-session blackout: not reproduced; added sparse source/output probes and
+  presentation-error logging to distinguish candidate causes without hiding frames.
+- Details and measured results: [investigation](shutdown-gpu-blackout.md).
