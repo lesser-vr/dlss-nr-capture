@@ -20,6 +20,11 @@ param(
   [ValidateRange(1,4)][int]$Preset = 3,
   [ValidateRange(25,100)][int]$Intensity = 100,
   [ValidateRange(0,1)][int]$Temporal = 1,
+  [ValidateSet(50,75,100)][int]$NrScale = 100,
+  [ValidateRange(0,100)][int]$Tone = 100,
+  [ValidateRange(0,100)][int]$Structure = 100,
+  [ValidateRange(0,100)][int]$ColorPreserve = 0,
+  [ValidateRange(0,1)][int]$HighlightGuard = 0,
   [ValidateRange(1,86400)][int]$TimeoutSeconds = 300
 )
 $ErrorActionPreference = 'Stop'
@@ -35,7 +40,8 @@ if (-not $OutputDir) { $OutputDir = Join-Path $release ('benchmark-' + (Get-Date
 if (Test-Path -LiteralPath $OutputDir) { throw 'Use a new output directory' }
 $OutputDir = [IO.Path]::GetFullPath($OutputDir).TrimEnd('\')
 $arguments = @('--output', $OutputDir, '--warmup', $Warmup, '--frames', $Frames,
-    '--style', $Style, '--preset', $Preset, '--intensity', $Intensity, '--temporal', $Temporal)
+    '--style', $Style, '--preset', $Preset, '--intensity', $Intensity, '--temporal', $Temporal,
+    '--nr-scale',$NrScale,'--tone',$Tone,'--structure',$Structure,'--color-preserve',$ColorPreserve,'--highlight-guard',$HighlightGuard)
 if ($CaptureOutput) { $arguments += '--capture-output' }
 if ($GpuCapture) { $arguments += '--gpu-capture' }
 $arguments += @('--capture-format',$CaptureFormat)

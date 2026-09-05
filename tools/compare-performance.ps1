@@ -15,6 +15,7 @@ $b = Get-Content -LiteralPath "$Candidate\summary.json" -Raw | ConvertFrom-Json
 $formatA=if($a.capture_replay_format){$a.capture_replay_format}else{'BGRA'}
 $formatB=if($b.capture_replay_format){$b.capture_replay_format}else{'BGRA'}
 if($formatA -ne $formatB){throw 'Capture replay formats differ'}
+if($a.process_timing_boundary -ne $b.process_timing_boundary){throw 'Processing timing boundaries differ; rerun both builds'}
 $ma = Get-Content -LiteralPath "$Baseline\manifest.json" -Raw | ConvertFrom-Json
 $mb = Get-Content -LiteralPath "$Candidate\manifest.json" -Raw | ConvertFrom-Json
 foreach ($s in @($a,$b)) {
@@ -47,7 +48,7 @@ $metrics = foreach ($field in @('process_mean_us','process_p95_us','process_p99_
 $passed = @($metrics | Where-Object regressed).Count -eq 0
 New-Item -ItemType Directory -Path $OutputDir | Out-Null
 [ordered]@{schema_version=1;performance_pass=$passed;threshold_percent=$ThresholdPercent;metrics=@($metrics);
- baseline=$Baseline;candidate=$Candidate;baseline_manifest=$ma;candidate_manifest=$mb;
+ baseline=$Baseline;candidate=$Candidate;baseline_summary=$a;candidate_summary=$b;baseline_manifest=$ma;candidate_manifest=$mb;
  note='Offline processing timings, not live FPS or visual quality. Repeat runs to assess noise.'} |
  ConvertTo-Json -Depth 8 | Set-Content -LiteralPath "$OutputDir\comparison.json" -Encoding UTF8
 $text = @('# Performance comparison','','Offline NR processing time; repeat runs to assess noise.','',

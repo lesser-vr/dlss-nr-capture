@@ -49,6 +49,13 @@ try {
  if (-not $rejected -or (Get-Content "$temp\perf-fail\comparison.json" -Raw | ConvertFrom-Json).performance_pass) {
   throw 'Performance regression was not detected'
  }
+ $summary.process_timing_boundary = 'prepare-nr-compose-completion-v1'
+ $summary | ConvertTo-Json | Set-Content -LiteralPath "$candidate\summary.json"
+ $rejected = $false
+ try { & "$SourceDir\tools\compare-performance.ps1" -Baseline $baseline -Candidate $candidate -OutputDir "$temp\perf-boundary" }
+ catch { $rejected = $true }
+ if (-not $rejected -or (Test-Path "$temp\perf-boundary")) { throw 'Different timing boundaries were accepted' }
+ $summary.Remove('process_timing_boundary')
  $summary.gpu = 'different'
  $summary | ConvertTo-Json | Set-Content -LiteralPath "$candidate\summary.json"
  $rejected = $false

@@ -29,6 +29,13 @@ $original = Get-Content -LiteralPath (Join-Path $output 'summary.json') -Raw
 if ($LASTEXITCODE -eq 0) { throw 'Benchmark overwrote an existing report directory' }
 if ((Get-Content -LiteralPath (Join-Path $output 'summary.json') -Raw) -ne $original) { throw 'Existing report changed' }
 Write-Host 'benchmark report and overwrite protection checks passed'
+ $creative = Join-Path $output 'creative'
+ & $BenchmarkPath --synthetic --warp --adapter $AdapterPath --output $creative --warmup 0 --frames 2 --nr-scale 75 --tone 50 --structure 25 --color-preserve 100 --highlight-guard 1
+ if ($LASTEXITCODE -ne 0) { throw 'Creative benchmark failed' }
+ $c = Get-Content -LiteralPath "$creative\summary.json" -Raw | ConvertFrom-Json
+ if ($c.nr_scale -ne 75 -or $c.model_width -ne 960 -or $c.model_height -ne 540 -or $c.tone -ne 50 -or $c.structure -ne 25 -or $c.color_preserve -ne 100 -or $c.highlight_guard -ne 1 -or $c.process_timing_boundary -ne 'prepare-nr-compose-completion-v1') { throw 'Creative benchmark metadata mismatch' }
+ & $BenchmarkPath --synthetic --warp --adapter $AdapterPath --output "$output\bad-scale" --nr-scale 60
+ if ($LASTEXITCODE -eq 0) { throw 'Invalid NR scale accepted' }
  $full = Join-Path $output 'full-resolution'
  & $BenchmarkPath --synthetic --warp --adapter $AdapterPath --output $full --warmup 0 --frames 1 --capture-output --full-resolution
  if ($LASTEXITCODE -ne 0) { throw 'Full-resolution quality capture failed' }

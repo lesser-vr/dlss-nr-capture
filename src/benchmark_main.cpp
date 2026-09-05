@@ -4,6 +4,8 @@
 #include "frame_processor.hpp"
 #include "quality_capture.hpp"
 #include "capture_replay.hpp"
+#include "nr_composition.hpp"
+#include "shared_copy_completion.hpp"
 #include <dxgi1_4.h>
 #include <mfapi.h>
 #include <mfidl.h>
@@ -59,6 +61,7 @@ int wmain(int argc, wchar_t** argv) {
                 std::cout << "--input VIDEO (or --synthetic) --output NEW_DIRECTORY [--adapter DLL]\n"
                     "[--frames 300] [--warmup 120] [--style 1] [--preset 3] [--intensity 100] [--temporal 1] [--warp] [--capture-output]\n"
                     "[--capture-format BGRA|NV12|P010] [--gpu-capture]\n"
+                    "[--nr-scale 50|75|100] [--tone 0..100] [--structure 0..100] [--color-preserve 0..100] [--highlight-guard 0|1]\n"
                     "Offline sequential benchmark; no capture/presentation, no real-time drop or fallback measurement.\n";
                 std::cout << "--full-resolution or --quality-width/--quality-height; optional --quality-x/--quality-y/--quality-region-width/--quality-region-height\n";
                 std::cout << "--gpu-capture replays decoded BGRA through native conversion/analysis (not hardware capture); --test-flow-failure 0..3 is an isolated recovery probe\n";
@@ -68,7 +71,8 @@ int wmain(int argc, wchar_t** argv) {
             else if (key == L"--input" || key == L"--output" || key == L"--adapter" || key == L"--frames" ||
                      key == L"--warmup" || key == L"--style" || key == L"--preset" || key == L"--intensity" || key == L"--temporal" ||
                      key == L"--quality-width" || key == L"--quality-height" || key == L"--quality-x" || key == L"--quality-y" ||
-                     key == L"--quality-region-width" || key == L"--quality-region-height" || key == L"--test-flow-failure" || key==L"--capture-format") {
+                     key == L"--quality-region-width" || key == L"--quality-region-height" || key == L"--test-flow-failure" || key==L"--capture-format" ||
+                     key==L"--nr-scale" || key==L"--tone" || key==L"--structure" || key==L"--color-preserve" || key==L"--highlight-guard") {
                 if (++i == argc) throw std::runtime_error("Missing option value");
                 args[key] = argv[i];
             } else throw std::runtime_error("Unknown option (see --help)");
@@ -83,6 +87,10 @@ int wmain(int argc, wchar_t** argv) {
         const unsigned style = number(L"--style", 1, 0, 3), preset = number(L"--preset", 3, 1, 4);
         const unsigned intensity = number(L"--intensity", 100, 25, 100), temporal = number(L"--temporal", 1, 0, 1);
         const unsigned flow_failure=number(L"--test-flow-failure",0,0,3);
+        const unsigned nr_scale=number(L"--nr-scale",100,50,100);
+        if(nr_scale!=50 && nr_scale!=75 && nr_scale!=100)throw std::runtime_error("NR scale must be 50/75/100");
+        const unsigned tone=number(L"--tone",100,0,100), structure=number(L"--structure",100,0,100);
+        const unsigned color_preserve=number(L"--color-preserve",0,0,100), highlight_guard=number(L"--highlight-guard",0,0,1);
         const bool gpu_capture=args.count(L"--gpu-capture")!=0;
         const auto capture_format=args.count(L"--capture-format")?args.at(L"--capture-format"):L"BGRA";
         if(capture_format!=L"BGRA" && capture_format!=L"NV12" && capture_format!=L"P010")throw std::runtime_error("Capture replay format must be BGRA/NV12/P010");
@@ -163,7 +171,10 @@ int wmain(int argc, wchar_t** argv) {
         auto get = reinterpret_cast<NrAdapterGetApi>(GetProcAddress(runtime.module, "DlssNrAdapterGetApi"));
         runtime.api = get ? get(nr_adapter_abi_version) : nullptr;
         if (!runtime.api) throw std::runtime_error("Adapter ABI mismatch");
-        if (!runtime.api->initialize(device.Get(), &desc)) { std::wcerr << runtime.api->last_error() << '\n'; return 1; }
+        NrComposition composition;
+        const auto model_desc=composition.initialize(device.Get(),desc,nr_scale,color_preserve,highlight_guard!=0);
+        SharedCopyCompletion completion;
+        if (!runtime.api->initialize(device.Get(), &model_desc)) { std::wcerr << runtime.api->last_error() << '\n'; return 1; }
         if (!fs::create_directories(output)) throw std::runtime_error("Cannot create output directory");
         std::ofstream csv(output / L"frames.csv"); csv.exceptions(std::ios::badbit | std::ios::failbit);
         csv << "frame,timestamp_100ns,warmup,success,decode_us,analysis_us,upload_us,process_wall_us,pipeline_us,nr_total_us,input_us,setup_us,flow_us,mv_us,prepare_us,execute_us,bridge_output_us,correction_output_us,flow_mode,flow_error\n";
@@ -250,13 +261,17 @@ int wmain(int argc, wchar_t** argv) {
             analyzer->process(frame); auto payload = analyzer->temporal_state();
             payload.nr_style = static_cast<uint16_t>(style); payload.nr_preset = static_cast<uint16_t>(preset);
             payload.nr_intensity_percent = static_cast<uint16_t>(intensity); payload.nr_temporal = static_cast<uint8_t>(temporal);
+            payload.nr_tone_percent=static_cast<uint16_t>(tone); payload.nr_structure_percent=static_cast<uint16_t>(structure);
             const auto analysis_us = us(analysis_start);
             const auto upload_start = Clock::now();
             if (gpu_capture) context->CopyResource(texture.Get(),frame.gpu->texture.Get());
             else context->UpdateSubresource(texture.Get(), 0, nullptr, frame.bgra.data(), width * 4, 0);
             const auto upload_us = us(upload_start)+conversion_us;
             const auto process_start = Clock::now();
-            const bool ok = runtime.api->process(context.Get(), texture.Get(), &payload);
+            auto* model_input=composition.prepare(context.Get(),texture.Get());
+            const bool ok = runtime.api->process(context.Get(), model_input, &payload);
+            if(ok)composition.compose(context.Get(),texture.Get());
+            throw_if_failed(completion.wait(context.Get()),"Benchmark composition completion");
             const auto process_us = us(process_start), pipeline_us = us(start);
             NrTimingSnapshot timing{}; if (ok) runtime.api->get_timings(&timing);
             csv << decoded << ',' << frame.timestamp_100ns << ',' << (decoded < warmup) << ',' << ok << ','
@@ -282,6 +297,10 @@ int wmain(int argc, wchar_t** argv) {
             << ",\n  \"gpu\": " << json(gpu_desc.Description) << ",\n  \"width\": " << width << ", \"height\": " << height
             << ",\n  \"fps_numerator\": " << fps_n << ", \"fps_denominator\": " << fps_d
             << ",\n  \"style\": " << style << ", \"preset\": " << preset << ", \"intensity\": " << intensity << ", \"temporal\": " << temporal
+            << ",\n  \"nr_scale\": " << nr_scale << ", \"tone\": " << tone << ", \"structure\": " << structure
+            << ", \"color_preserve\": " << color_preserve << ", \"highlight_guard\": " << highlight_guard
+            << ", \"model_width\": " << model_desc.Width << ", \"model_height\": " << model_desc.Height
+            << ", \"process_timing_boundary\": \"prepare-nr-compose-completion-v1\""
             << ",\n  \"warmup_requested\": " << warmup << ", \"frames_requested\": " << frames << ", \"frames_decoded\": " << decoded
             << ",\n  \"measured_frames\": " << process_times.size() << ", \"failures\": " << failures << ", \"eof\": " << (eof ? "true" : "false")
             << ",\n  \"process_mean_us\": " << stats.mean << ", \"process_p95_us\": " << stats.p95 << ", \"process_p99_us\": " << stats.p99

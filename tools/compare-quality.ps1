@@ -81,7 +81,7 @@ $video
 <table><tr><th>Source frame</th><th>Source seconds</th><th>Output MAE</th><th>Residual increase</th><th>Review flag</th></tr>$($table -join "`n")</table>
 "@
 $html | Set-Content -LiteralPath (Join-Path $OutputDir 'report.html') -Encoding UTF8
-[ordered]@{baseline=$Baseline;candidate=$Candidate;baseline_manifest=$ma;candidate_manifest=$mb} |
+[ordered]@{baseline=$Baseline;candidate=$Candidate;baseline_summary=$a;candidate_summary=$b;baseline_manifest=$ma;candidate_manifest=$mb} |
   ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $OutputDir 'provenance.json') -Encoding UTF8
 Get-Content -LiteralPath (Join-Path $OutputDir 'comparison.json') -Raw
 Write-Host "Report: $OutputDir\report.html"
