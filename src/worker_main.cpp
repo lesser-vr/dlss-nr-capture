@@ -2,6 +2,8 @@
 #include "worker_output_policy.hpp"
 #include "worker_protocol.hpp"
 #include "shared_copy_completion.hpp"
+#include "nr_composition.hpp"
+#include <chrono>
 #include <windows.h>
 #include <d3d11_1.h>
 #include <dxgi1_2.h>
@@ -9,6 +11,7 @@
 #include <cstring>
 #include <cwchar>
 #include <memory>
+#include <algorithm>
 #include <string>
 using Microsoft::WRL::ComPtr;
 
@@ -102,7 +105,7 @@ std::wstring adapter_path(bool nr_enabled)
     return path;
 }
 
-int wmain(int argc, wchar_t** argv)
+int run_worker(int argc, wchar_t** argv)
 {
     const bool warp_test = argc == 7 && wcscmp(argv[6], L"--warp-test") == 0;
     if (argc != 6 && !warp_test) return 2;
@@ -153,13 +156,18 @@ int wmain(int argc, wchar_t** argv)
     }
     LONG adapter_error = 0;
     const bool nr_enabled = InterlockedCompareExchange(&temporal->nr_enabled, 0, 0) != 0;
+    NrComposition composition;
+    const auto model_description=composition.initialize(device.Get(),description,
+        nr_enabled?static_cast<UINT>(InterlockedCompareExchange(&temporal->nr_scale_percent,0,0)):100,
+        nr_enabled?static_cast<UINT>(std::clamp<LONG>(InterlockedCompareExchange(&temporal->nr_color_preserve,0,0),0,100)):0,
+        nr_enabled && InterlockedCompareExchange(&temporal->nr_highlight_guard,0,0)!=0);
     std::unique_ptr<INrAdapter> adapter;
     if (nr_enabled)
         adapter = std::make_unique<ExternalNrAdapter>(adapter_path(true), adapter_error);
     else
         adapter = std::make_unique<PassthroughNrAdapter>();
     std::wstring adapter_error_message;
-    if (!adapter->initialize(device.Get(), description)) {
+    if (!adapter->initialize(device.Get(), model_description)) {
         adapter_error_message = adapter->error_message();
         adapter = std::make_unique<PassthroughNrAdapter>();
         if (!adapter->initialize(device.Get(), description)) {
@@ -190,12 +198,19 @@ int wmain(int argc, wchar_t** argv)
             payload.nr_preset = static_cast<uint16_t>(InterlockedCompareExchange(&temporal->nr_preset, 0, 0));
             payload.nr_intensity_percent = static_cast<uint16_t>(InterlockedCompareExchange(&temporal->nr_intensity_percent, 0, 0));
             payload.nr_temporal = InterlockedCompareExchange(&temporal->nr_temporal, 0, 0) != 0;
+            payload.nr_tone_percent=static_cast<uint16_t>(std::clamp<LONG>(InterlockedCompareExchange(&temporal->nr_tone_percent,0,0),0,100));
+            payload.nr_structure_percent=static_cast<uint16_t>(std::clamp<LONG>(InterlockedCompareExchange(&temporal->nr_structure_percent,0,0),0,100));
             payload.nr_automask = 1;
             if (worker_frame_eligible(payload, last_sequence)) {
-                if (adapter->process(context.Get(), processing_texture.Get(), payload)) {
+                const auto processing_start=std::chrono::steady_clock::now();
+                auto* model_input=adapter->state_code()==2?composition.prepare(context.Get(),processing_texture.Get()):processing_texture.Get();
+                if (adapter->process(context.Get(), model_input, payload)) {
+                    if(adapter->state_code()==2)composition.compose(context.Get(),processing_texture.Get());
+                    if(FAILED(copy_completion.wait(context.Get()))){UnmapViewOfFile(temporal);CloseHandle(parent);return 9;}
                     consecutive_failures = 0;
                     last_sequence = payload.frame_sequence;
-                    const NrTimingSnapshot timing = adapter->timings();
+                    NrTimingSnapshot timing = adapter->timings();
+                    timing.total_us=static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-processing_start).count());
                     InterlockedExchange(&temporal->flow_mode,static_cast<LONG>(timing.flow_mode));
                     InterlockedExchange(&temporal->flow_error,static_cast<LONG>(timing.flow_error));
                     InterlockedExchange64(&temporal->nr_total_us, static_cast<LONG64>(timing.total_us));
@@ -227,7 +242,7 @@ int wmain(int argc, wchar_t** argv)
             if (output_completed && output_mutex->AcquireSync(0, 0) == S_OK) {
                 context->CopyResource(output_texture.Get(), processing_texture.Get());
                 temporal->output_frame_sequence = payload.frame_sequence;
-                temporal->output_processing_us = adapter->timings().total_us;
+                temporal->output_processing_us = static_cast<uint64_t>(InterlockedCompareExchange64(&temporal->nr_total_us,0,0));
                 temporal->output_completed_ms = GetTickCount64();
                 InterlockedIncrement64(&temporal->worker_published_frames);
                 MemoryBarrier();
@@ -240,4 +255,9 @@ int wmain(int argc, wchar_t** argv)
     UnmapViewOfFile(temporal);
     CloseHandle(parent);
     return 0;
+}
+
+int wmain(int argc,wchar_t** argv) {
+    try {return run_worker(argc,argv);}
+    catch(const std::exception&){return 10;}
 }

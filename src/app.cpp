@@ -48,6 +48,10 @@ constexpr UINT history_overlay_command = 50002;
 constexpr UINT gpu_capture_command = 50003;
 constexpr UINT nr_enable_command = 51000;
 constexpr UINT nr_temporal_command = 51001;
+constexpr UINT comparison_command = 51002;
+constexpr UINT comparison_swap_command = 51003;
+constexpr UINT comparison_hold_command = 51004, comparison_zoom_command = 51005;
+constexpr UINT creative_base=51500, creative_guard=51540, creative_reset=51541;
 constexpr UINT nr_style_base = 51100;
 constexpr UINT nr_preset_base = 51200;
 constexpr UINT nr_intensity_base = 51300;
@@ -171,6 +175,25 @@ int App::run(HINSTANCE instance, int show_command)
 
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+        const bool local=message.hwnd==window_ || IsChild(window_,message.hwnd);
+        const bool plain=(GetKeyState(VK_CONTROL)&0x8000)==0 && (GetKeyState(VK_MENU)&0x8000)==0 && (GetKeyState(VK_SHIFT)&0x8000)==0;
+        if(local && plain && message.wParam==VK_F8 && (message.message==WM_KEYDOWN || message.message==WM_KEYUP)) {
+            if(message.message==WM_KEYDOWN && !(message.lParam&(1LL<<30))) SendMessageW(window_,WM_COMMAND,comparison_hold_command,0);
+            continue;
+        }
+        if(local && plain && message.wParam==VK_F9 && (message.message==WM_KEYDOWN || message.message==WM_KEYUP)) {
+            if(message.message==WM_KEYDOWN && !(message.lParam&(1LL<<30)) && !suspended_ && !graphics_failed_) toggle_comparison();
+            continue;
+        }
+        if(local && plain && !nr_enabled_ && message.wParam==VK_TAB &&
+           message.message==WM_KEYDOWN && !(message.lParam&(1LL<<30)) &&
+           !suspended_ && !graphics_failed_) {
+            renderer_.show_notification(L"NR OFF - TURN ON NR WITH F10");
+        }
+        if(local && comparison_enabled_ && message.wParam==VK_TAB && (message.message==WM_KEYDOWN || message.message==WM_KEYUP)) {
+            renderer_.set_comparison_peek(message.message==WM_KEYDOWN && plain);
+            continue;
+        }
         // Handle the application shortcut before dispatch so combo-box focus
         // and the default Windows F10 menu behavior cannot swallow it.
         const bool nr_shortcut = message.wParam == VK_F10 &&
@@ -242,6 +265,11 @@ void App::load_settings()
     if (read_dword(L"NrStyle", value)) nr_style_ = std::min(value, 3u);
     if (read_dword(L"NrPreset", value)) nr_preset_ = std::clamp(value, 1u, 4u);
     if (read_dword(L"NrIntensity", value)) nr_intensity_percent_ = std::clamp(value, 25u, 100u);
+    if(read_dword(L"NrTone",value))nr_tone_percent_=std::min(value,100u);
+    if(read_dword(L"NrStructure",value))nr_structure_percent_=std::min(value,100u);
+    if(read_dword(L"NrScale",value))nr_scale_percent_=(value==50 || value==75)?value:100;
+    if(read_dword(L"NrColorPreserve",value))nr_color_preserve_=std::min(value,100u);
+    if(read_dword(L"NrHighlightGuard",value))nr_highlight_guard_=value!=0;
     if (read_dword(L"NrWaitMs", value)) nr_wait_ms_ = value == 16 || value == 33 ? value : 2;
     if (read_dword(L"AlwaysOnTop", value)) always_on_top_ = value != 0;
     if (read_dword(L"PreventCaptureSleep", value)) prevent_capture_sleep_ = value != 0;
@@ -284,6 +312,9 @@ void App::save_settings()
     write_dword(L"NrStyle", nr_style_);
     write_dword(L"NrPreset", nr_preset_);
     write_dword(L"NrIntensity", nr_intensity_percent_);
+    write_dword(L"NrTone",nr_tone_percent_);write_dword(L"NrStructure",nr_structure_percent_);
+    write_dword(L"NrScale",nr_scale_percent_);write_dword(L"NrColorPreserve",nr_color_preserve_);
+    write_dword(L"NrHighlightGuard",nr_highlight_guard_?1u:0u);
     write_dword(L"NrWaitMs", nr_wait_ms_);
     write_dword(L"AlwaysOnTop", always_on_top_ ? 1u : 0u);
     write_dword(L"PreventCaptureSleep", prevent_capture_sleep_ ? 1u : 0u);
@@ -316,6 +347,13 @@ void App::discover_capture_devices()
     nr_intensity_menu_ = CreatePopupMenu();
     nr_latency_menu_ = CreatePopupMenu();
     AppendMenuW(nr_menu_, MF_STRING | (nr_enabled_ ? MF_CHECKED : 0), nr_enable_command, L"Toggle DLSS Neural Rendering\tF10");
+    AppendMenuW(nr_menu_,MF_STRING | (comparison_enabled_?MF_CHECKED:0),comparison_command,L"Compare original / NR\tF9");
+    AppendMenuW(nr_menu_,MF_STRING | (comparison_swapped_?MF_CHECKED:0),comparison_swap_command,L"Swap comparison sides");
+    AppendMenuW(nr_menu_,MF_STRING | MF_GRAYED,0,L"Comparison: hold Tab for original; drag divider");
+    AppendMenuW(nr_menu_,MF_STRING,comparison_hold_command,L"Hold / release comparison frame\tF8");
+    AppendMenuW(nr_menu_,MF_STRING,comparison_zoom_command,L"Held frame zoom: cycle 1x / 2x / 4x");
+    nr_creative_menu_=CreatePopupMenu();rebuild_creative_menu();
+    AppendMenuW(nr_menu_,MF_POPUP,reinterpret_cast<UINT_PTR>(nr_creative_menu_),L"Creative controls (experimental)");
     AppendMenuW(nr_menu_, MF_STRING | (nr_temporal_enabled_ ? MF_CHECKED : 0), nr_temporal_command, L"Temporal accumulation");
     AppendMenuW(nr_menu_, MF_SEPARATOR, 0, nullptr);
     for (UINT i = 0; i < 4; ++i) {
@@ -1061,6 +1099,7 @@ void App::restart_nr_worker(uint32_t width, uint32_t height)
     renderer_.set_temporal_state(temporal_state_);
     InterlockedExchange(&temporal_state_->nr_enabled, nr_enabled_ ? 1 : 0);
     InterlockedExchange(&temporal_state_->nr_style, static_cast<LONG>(nr_style_));
+    publish_creative_settings();
     InterlockedExchange(&temporal_state_->nr_preset, static_cast<LONG>(nr_preset_));
     InterlockedExchange(&temporal_state_->nr_intensity_percent, static_cast<LONG>(nr_intensity_percent_));
     InterlockedExchange(&temporal_state_->nr_temporal, nr_temporal_enabled_ ? 1 : 0);
@@ -1093,8 +1132,31 @@ void App::restart_nr_worker(uint32_t width, uint32_t height)
     }
 }
 
+void App::publish_creative_settings() {
+    if(!temporal_state_)return;
+    InterlockedExchange(&temporal_state_->nr_tone_percent,nr_tone_percent_);
+    InterlockedExchange(&temporal_state_->nr_structure_percent,nr_structure_percent_);
+    InterlockedExchange(&temporal_state_->nr_scale_percent,nr_scale_percent_);
+    InterlockedExchange(&temporal_state_->nr_color_preserve,nr_color_preserve_);
+    InterlockedExchange(&temporal_state_->nr_highlight_guard,nr_highlight_guard_?1:0);
+}
+void App::rebuild_creative_menu() {
+    while(GetMenuItemCount(nr_creative_menu_)>0)DeleteMenu(nr_creative_menu_,0,MF_BYPOSITION);
+    const wchar_t* names[]={L"Tone",L"Structure",L"NR resolution",L"Preserve source color"};
+    const uint32_t selected[]={nr_tone_percent_,nr_structure_percent_,nr_scale_percent_,nr_color_preserve_};
+    for(UINT group=0;group<4;++group) {
+        HMENU menu=CreatePopupMenu();
+        for(UINT i=0;i<5;++i){const UINT percent=i*25;if(group==2 && percent<50)continue;
+            const auto label=std::to_wstring(percent)+L"%";
+            AppendMenuW(menu,MF_STRING | (selected[group]==percent?MF_CHECKED:0),creative_base+group*10+i,label.c_str());}
+        AppendMenuW(nr_creative_menu_,MF_POPUP,reinterpret_cast<UINT_PTR>(menu),names[group]);
+    }
+    AppendMenuW(nr_creative_menu_,MF_STRING | (nr_highlight_guard_?MF_CHECKED:0),creative_guard,L"Protect highlights");
+    AppendMenuW(nr_creative_menu_,MF_STRING,creative_reset,L"Restore creative defaults");
+}
 void App::apply_nr_settings(bool restart_worker)
 {
+    renderer_.set_comparison_hold(false);
     renderer_.set_worker_wait_ms(nr_wait_ms_);
     if (temporal_state_) {
         InterlockedExchange(&temporal_state_->nr_style, static_cast<LONG>(nr_style_));
@@ -1102,6 +1164,7 @@ void App::apply_nr_settings(bool restart_worker)
         InterlockedExchange(&temporal_state_->nr_intensity_percent, static_cast<LONG>(nr_intensity_percent_));
         InterlockedExchange(&temporal_state_->nr_temporal, nr_temporal_enabled_ ? 1 : 0);
     }
+    publish_creative_settings();
     save_settings();
     if (restart_worker && active_mode_) {
         const auto& mode = modes_[*active_mode_];
@@ -1110,6 +1173,16 @@ void App::apply_nr_settings(bool restart_worker)
     update_title();
 }
 
+void App::toggle_comparison()
+{
+    if(!comparison_enabled_ && !nr_enabled_) {set_nr_enabled(true);if(!nr_enabled_)return;}
+    comparison_enabled_=!comparison_enabled_;
+    renderer_.set_comparison(comparison_enabled_);
+    renderer_.set_comparison_swap(comparison_swapped_);
+    CheckMenuItem(nr_menu_,comparison_command,MF_BYCOMMAND | (comparison_enabled_?MF_CHECKED:MF_UNCHECKED));
+    renderer_.show_notification(comparison_enabled_?L"COMPARE ON - HOLD TAB FOR ORIGINAL":L"COMPARE OFF");
+    comparison_dragging_=false;if(GetCapture()==window_)ReleaseCapture();
+}
 void App::set_nr_enabled(bool enabled)
 {
     if (enabled) {
@@ -1217,6 +1290,9 @@ void App::copy_diagnostics()
     report.add(L"Style", nr_style_);
     report.add(L"Preset", nr_preset_);
     report.add(L"Intensity percent", nr_intensity_percent_);
+    report.add(L"Tone percent",nr_tone_percent_);report.add(L"Structure percent",nr_structure_percent_);
+    report.add(L"NR scale percent",nr_scale_percent_);report.add(L"Source color preservation",nr_color_preserve_);
+    report.add(L"Highlight protection",nr_highlight_guard_?L"on":L"off");
     report.add(L"Worker wait ms", nr_wait_ms_);
     report.add(L"Received frames", received_frames_.load());
     report.add(L"GPU capture requested", gpu_capture_enabled_ ? L"yes" : L"no");
@@ -1320,6 +1396,7 @@ void App::ensure_graphics_health()
         {std::scoped_lock lock(frame_mutex_);pending_frame_.reset();}
         capture_->set_gpu_device(nullptr);
         renderer_.reset();renderer_.initialize(window_);
+        renderer_.set_comparison(comparison_enabled_);renderer_.set_comparison_swap(comparison_swapped_);
         renderer_.set_worker_wait_ms(nr_wait_ms_);capture_->set_gpu_device(renderer_.device());
         graphics_failed_=false;++graphics_recoveries_;
         if(active_mode_) {
@@ -1368,6 +1445,34 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         if (message == WM_COMMAND || message == WM_TIMER || message == WM_MOUSEWHEEL || message == frame_ready_message) return 0;
     }
     switch (message) {
+    case WM_ACTIVATEAPP:
+        if(!wparam){renderer_.set_comparison_peek(false);comparison_dragging_=false;if(GetCapture()==window_)ReleaseCapture();}
+        break;
+    case WM_KILLFOCUS:
+        renderer_.set_comparison_peek(false);
+        break;
+    case WM_LBUTTONDOWN:
+        if(comparison_enabled_) {
+            RECT rect{};GetClientRect(window_,&rect);
+            if(std::abs(GET_X_LPARAM(lparam)-int(rect.right*renderer_.comparison_split()))<=12){comparison_dragging_=true;SetCapture(window_);SetFocus(window_);return 0;}
+        }
+        break;
+    case WM_MOUSEMOVE:
+        if(comparison_enabled_ && comparison_dragging_) {
+            RECT rect{};GetClientRect(window_,&rect);
+            if(rect.right>0)renderer_.set_comparison_split(std::clamp(float(GET_X_LPARAM(lparam))/rect.right,0.05f,0.95f));
+            return 0;
+        }
+        break;
+    case WM_LBUTTONUP:
+        if(comparison_dragging_){comparison_dragging_=false;ReleaseCapture();return 0;}
+        break;
+    case WM_CAPTURECHANGED:
+        comparison_dragging_=false;break;
+    case WM_APP+46:
+        return isolated_test_settings_?static_cast<LRESULT>(renderer_.comparison_diagnostics()):0;
+    case WM_APP+47:
+        return isolated_test_settings_?static_cast<LRESULT>(renderer_.comparison_split()*1000):0;
     case WM_APP+45:
         if(isolated_test_settings_) {graphics_failed_=true;last_graphics_retry_=0;}
         return 0;
@@ -1495,6 +1600,23 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     case WM_COMMAND: {
         if(suspended_ || graphics_failed_) return 0;
         const UINT command = LOWORD(wparam);
+        if(command==comparison_hold_command){
+            if(!comparison_enabled_){renderer_.show_notification(L"ENABLE COMPARISON WITH F9 FIRST");return 0;}
+            const bool was=renderer_.comparison_held();
+            renderer_.set_comparison_hold(!was);
+            renderer_.show_notification(renderer_.comparison_held()?L"FRAME HELD - F8 TO RESUME":was?L"LIVE COMPARISON":L"WAIT FOR A MATCHED NR FRAME");return 0;
+        }
+        if(command==comparison_zoom_command){renderer_.cycle_comparison_zoom();return 0;}
+        if(command==creative_guard || command==creative_reset || (command>=creative_base && command<creative_guard)) {
+            if(command==creative_guard)nr_highlight_guard_=!nr_highlight_guard_;
+            else if(command==creative_reset){nr_tone_percent_=nr_structure_percent_=nr_scale_percent_=100;nr_color_preserve_=0;nr_highlight_guard_=false;}
+            else {const UINT group=(command-creative_base)/10,index=(command-creative_base)%10;
+                if(group>3 || index>4 || (group==2 && index<2))return 0;
+                uint32_t* values[]={&nr_tone_percent_,&nr_structure_percent_,&nr_scale_percent_,&nr_color_preserve_};*values[group]=index*25;}
+            renderer_.set_comparison_hold(false);rebuild_creative_menu();apply_nr_settings(true);return 0;
+        }
+        if(command==comparison_command){toggle_comparison();return 0;}
+        if(command==comparison_swap_command){comparison_swapped_=!comparison_swapped_;renderer_.set_comparison_swap(comparison_swapped_);CheckMenuItem(nr_menu_,comparison_swap_command,MF_BYCOMMAND | (comparison_swapped_?MF_CHECKED:MF_UNCHECKED));return 0;}
         if (command == passthrough_command) { set_motion_analysis(false); return 0; }
         if (command == motion_analysis_command) { set_motion_analysis(true); return 0; }
         if (command == history_overlay_command) { set_history_overlay(!history_overlay_enabled_); return 0; }

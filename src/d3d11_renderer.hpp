@@ -13,6 +13,7 @@
 #include <dxgi1_6.h>
 #include <string>
 #include <utility>
+#include <array>
 
 class D3D11Renderer {
 public:
@@ -20,6 +21,20 @@ public:
     void initialize(HWND window);
     void reset();
     bool presented() const {return presented_;}
+    void set_comparison(bool enabled);
+    void set_comparison_peek(bool value) { comparison_peek_=value; }
+    void set_comparison_swap(bool value) { comparison_swap_=value; }
+    void set_comparison_split(float value) { comparison_split_=value; }
+    float comparison_split() const { return comparison_split_; }
+    bool comparison_held() const {return comparison_hold_;}
+    unsigned comparison_diagnostics() const {
+        return (comparison_?1u:0u)|(comparison_peek_?2u:0u)|(comparison_swap_?4u:0u)|
+            (comparison_hold_?8u:0u)|(comparison_pair_?16u:0u)|(correction_active_?32u:0u)|
+            ((notification_message_==L"NR OFF - TURN ON NR WITH F10" && GetTickCount64()-nr_notification_started_ms_<1500)?64u:0u)|
+            (static_cast<unsigned>(comparison_zoom_)<<8);
+    }
+    void set_comparison_hold(bool value) {comparison_hold_=value && comparison_ && comparison_pair_ && correction_active_;if(!comparison_hold_)comparison_zoom_=1;}
+    void cycle_comparison_zoom() {if(comparison_hold_)comparison_zoom_=comparison_zoom_==1.0f?2.0f:comparison_zoom_==2.0f?4.0f:1.0f;}
     ID3D11Device* device() const noexcept { return device_.Get(); }
     void resize(uint32_t width, uint32_t height);
     void render(const VideoFrame& frame);
@@ -27,7 +42,7 @@ public:
     void clear();
     std::wstring take_diagnostic() { return std::exchange(diagnostic_, {}); }
     void redraw_idle();
-    void set_capture_interrupted(bool value) noexcept { capture_interrupted_ = value; }
+    void set_capture_interrupted(bool value) noexcept { capture_interrupted_ = value;if(value)set_comparison_hold(false); }
     void show_nr_toggle(bool enabled);
     void show_notification(const std::wstring& message);
     void set_performance_text(const std::wstring& text) { performance_text_ = text; }
@@ -55,6 +70,20 @@ public:
     void set_worker_processing_time_us(uint64_t value) noexcept { worker_processing_time_us_ = value; }
 
 private:
+    struct CompareFrame { ComPtr<ID3D11Texture2D> texture; uint64_t sequence{}; bool valid{}; };
+    std::array<CompareFrame,4> compare_frames_;
+    size_t compare_next_{};
+    ComPtr<ID3D11Texture2D> compare_original_;
+    ComPtr<ID3D11ShaderResourceView> compare_original_view_;
+    ComPtr<ID3D11Buffer> compare_constants_;
+    bool comparison_{}, comparison_peek_{}, comparison_swap_{}, comparison_pair_{};
+    float comparison_split_{0.5f};
+    bool comparison_hold_{};
+    float comparison_zoom_{1};
+    void reset_comparison_frames();
+    void remember_comparison_frame(uint64_t sequence);
+    void match_comparison_frame(uint64_t sequence);
+    void draw_comparison_overlay();
     bool presented_{};
     WorkerTemporalState* temporal_state_{};
     void present(UINT interval, UINT flags);

@@ -21,6 +21,13 @@ public:
     int run(HINSTANCE instance, int show_command);
 
 private:
+    bool comparison_enabled_{}, comparison_swapped_{}, comparison_dragging_{};
+    uint32_t nr_tone_percent_{100}, nr_structure_percent_{100}, nr_scale_percent_{100}, nr_color_preserve_{};
+    bool nr_highlight_guard_{};
+    HMENU nr_creative_menu_{};
+    void rebuild_creative_menu();
+    void publish_creative_settings();
+    void toggle_comparison();
     void ensure_graphics_health();
     bool graphics_failed_{}, suspended_{};
     uint64_t graphics_recoveries_{}, last_graphics_retry_{};
