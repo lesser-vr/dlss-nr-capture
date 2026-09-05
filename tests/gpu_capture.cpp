@@ -13,6 +13,24 @@ int main() {
             D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
             nullptr,0,D3D11_SDK_VERSION,&device,nullptr,&context);
         if (FAILED(created)) { std::cout << "SKIP: hardware video device unavailable\n"; return 77; }
+        // D3D_DRIVER_TYPE_HARDWARE can succeed on hosted/virtual adapters
+        // without a video processor. Check that independent capability first;
+        // converter failures after this gate remain test failures.
+        ComPtr<ID3D11VideoDevice> video;
+        ComPtr<ID3D11VideoProcessorEnumerator> enumerator;
+        ComPtr<ID3D11VideoProcessor> capability_processor;
+        D3D11_VIDEO_PROCESSOR_CONTENT_DESC content{};
+        content.InputFrameFormat=D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+        content.InputWidth=content.OutputWidth=192;
+        content.InputHeight=content.OutputHeight=108;
+        content.Usage=D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
+        HRESULT video_hr=device.As(&video);
+        if(SUCCEEDED(video_hr)) video_hr=video->CreateVideoProcessorEnumerator(&content,&enumerator);
+        if(SUCCEEDED(video_hr)) video_hr=video->CreateVideoProcessor(enumerator.Get(),0,&capability_processor);
+        if(FAILED(video_hr)) {
+            std::cout<<"SKIP: video processor unavailable, HRESULT="<<std::hex<<static_cast<unsigned>(video_hr)<<'\n';
+            return 77;
+        }
         ComPtr<ID3D10Multithread> protection;
         throw_if_failed(device.As(&protection),"multithread protection");
         protection->SetMultithreadProtected(TRUE);

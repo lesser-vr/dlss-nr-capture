@@ -351,6 +351,8 @@ void D3D11Renderer::render(const VideoFrame& frame)
             temporal_state_->payload = frame.temporal;
             MemoryBarrier();
         }
+        // Complete shared-resource access before granting the other process ownership.
+        throw_if_failed(shared_copy_completion_.wait(context_.Get()), "Shared input copy completion");
         shared_input_mutex_->ReleaseSync(1);
     }
 
@@ -375,6 +377,7 @@ void D3D11Renderer::render(const VideoFrame& frame)
             correction_updated_tick_ms_ = temporal_state_ ? temporal_state_->output_completed_ms : update_tick;
             correction_available_ = true;
             ++worker_output_frames_;
+            throw_if_failed(shared_copy_completion_.wait(context_.Get()), "Shared output copy completion");
         }
         shared_output_mutex_->ReleaseSync(0);
     }

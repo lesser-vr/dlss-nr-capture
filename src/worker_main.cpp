@@ -1,6 +1,7 @@
 #include "nr_adapter_api.hpp"
 #include "worker_output_policy.hpp"
 #include "worker_protocol.hpp"
+#include "shared_copy_completion.hpp"
 #include <windows.h>
 #include <d3d11_1.h>
 #include <dxgi1_2.h>
@@ -103,7 +104,8 @@ std::wstring adapter_path(bool nr_enabled)
 
 int wmain(int argc, wchar_t** argv)
 {
-    if (argc != 6) return 2;
+    const bool warp_test = argc == 7 && wcscmp(argv[6], L"--warp-test") == 0;
+    if (argc != 6 && !warp_test) return 2;
     const DWORD parent_id = static_cast<DWORD>(_wtoi(argv[1]));
     const HANDLE shared_input = reinterpret_cast<HANDLE>(_wcstoui64(argv[2], nullptr, 10));
     const HANDLE shared_output = reinterpret_cast<HANDLE>(_wcstoui64(argv[3], nullptr, 10));
@@ -124,7 +126,7 @@ int wmain(int argc, wchar_t** argv)
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
     D3D_FEATURE_LEVEL feature{};
-    if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+    if (FAILED(D3D11CreateDevice(nullptr, warp_test ? D3D_DRIVER_TYPE_WARP : D3D_DRIVER_TYPE_HARDWARE, nullptr,
             D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION,
             &device, &feature, &context))) {
         UnmapViewOfFile(temporal); CloseHandle(parent); return 5;
@@ -173,6 +175,7 @@ int wmain(int argc, wchar_t** argv)
     bool signaled = false;
     uint64_t last_sequence = 0;
     int consecutive_failures = 0;
+    SharedCopyCompletion copy_completion;
     while (WaitForSingleObject(parent, 0) == WAIT_TIMEOUT) {
         InterlockedExchange64(&temporal->worker_heartbeat_ms, static_cast<LONG64>(GetTickCount64()));
         const HRESULT acquired = input_mutex->AcquireSync(1, 100);
@@ -180,6 +183,7 @@ int wmain(int argc, wchar_t** argv)
             context->CopyResource(processing_texture.Get(), input_texture.Get());
             TemporalAnalysisPayload payload = temporal->payload;
             MemoryBarrier();
+            if (FAILED(copy_completion.wait(context.Get()))) { UnmapViewOfFile(temporal); CloseHandle(parent); return 9; }
             input_mutex->ReleaseSync(0);
             bool output_completed = false;
             payload.nr_style = static_cast<uint16_t>(InterlockedCompareExchange(&temporal->nr_style, 0, 0));
@@ -227,6 +231,7 @@ int wmain(int argc, wchar_t** argv)
                 temporal->output_completed_ms = GetTickCount64();
                 InterlockedIncrement64(&temporal->worker_published_frames);
                 MemoryBarrier();
+                if (FAILED(copy_completion.wait(context.Get()))) { UnmapViewOfFile(temporal); CloseHandle(parent); return 9; }
                 output_mutex->ReleaseSync(1);
             } else if (output_completed) InterlockedIncrement64(&temporal->worker_dropped_outputs);
         }

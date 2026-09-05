@@ -1,4 +1,5 @@
 #pragma once
+#include "shared_copy_completion.hpp"
 
 #include "common.hpp"
 #include "frame.hpp"
@@ -72,6 +73,7 @@ private:
     HWND window_{};
     ComPtr<ID3D11Device> device_;
     ComPtr<ID3D11DeviceContext> context_;
+    SharedCopyCompletion shared_copy_completion_;
     ComPtr<IDXGISwapChain1> swap_chain_;
     ComPtr<ID3D11RenderTargetView> render_target_;
     ComPtr<ID3D11Texture2D> frame_texture_;

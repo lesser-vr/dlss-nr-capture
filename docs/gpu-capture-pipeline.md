@@ -98,7 +98,7 @@ quality verdict. Reports/manifests are in ignored `build/long-flow-{a1,b1,b2,a2}
 
 ## Automated coverage
 
-- Eight regression suites, adding actual worker IPC/backpressure tests and
+- Nine regression suites, adding actual worker IPC/backpressure tests and
   hardware video-converter tests. Hardware-only cases explicitly skip with
   code 77 if no hardware D3D device is available; a skip is not hardware proof.
 - Worker test: 80 paired pixel/metadata frames, occupied output, bounded drops,
@@ -203,3 +203,25 @@ capture remains opt-in. For the proposed longer automation, see
 
 Long-play automation remains explicitly on hold. GPU-native capture remains
 opt-in; passing local checks does not remove the colorimetry/driver limitations.
+
+### CI-discovered shared-copy completion fix
+
+The first follow-up CI run (33942456906) failed the new worker pixel pairing
+and video converter tests. D3D device creation alone was insufficient to prove
+video-processor support on that runner. The converter test now independently
+checks video-processor creation and reports an explicit unsupported skip before
+testing conversion; a conversion failure after that gate is still a failure.
+
+The worker failure was not skipped. An explicit WARP worker mode reproduced
+sequence 1 metadata with sequence 2 pixels locally. Merely flushing commands
+did not resolve it. Shared input/output accesses now wait on a reusable event
+query before releasing keyed-mutex ownership, with a one-second upper bound.
+This prevents pending copies from observing a later overwrite. Query timeout
+fails the operation; the worker exits into existing restart protection.
+There is a CPU synchronization cost; this is not a claim of zero-copy or a new
+performance improvement. The ninth, mandatory WARP pipeline suite now verifies
+all 80 paired frames, output backpressure, resumption and invalid-frame rejection.
+
+Microsoft's [shared-resource guidance](https://learn.microsoft.com/en-us/windows/win32/api/d3d11/nf-d3d11-id3d11device-opensharedresource)
+requires submitting shared-resource updates; the extra completion wait here is
+based on the reproduced WARP race, not an assumption that Flush waits for GPU completion.

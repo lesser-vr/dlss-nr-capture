@@ -1,5 +1,6 @@
 #include "common.hpp"
 #include "worker_protocol.hpp"
+#include "shared_copy_completion.hpp"
 #include <d3d11_1.h>
 #include <dxgi1_2.h>
 #include <iostream>
@@ -10,13 +11,19 @@ struct Child {
     ~Child() { if (info.hProcess) { TerminateProcess(info.hProcess,0); WaitForSingleObject(info.hProcess,5000); CloseHandle(info.hProcess); CloseHandle(info.hThread); } }
 };
 int wmain(int argc,wchar_t** argv) {
-    if (argc!=2) return 2;
+    const bool warp=argc==3 && wcscmp(argv[2],L"--warp")==0;
+    if (argc!=2 && !warp) return 2;
     try {
         ComPtr<ID3D11Device> device; ComPtr<ID3D11DeviceContext> context;
-        if (FAILED(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+        if (FAILED(D3D11CreateDevice(nullptr,warp?D3D_DRIVER_TYPE_WARP:D3D_DRIVER_TYPE_HARDWARE,nullptr,D3D11_CREATE_DEVICE_BGRA_SUPPORT,
             nullptr,0,D3D11_SDK_VERSION,&device,nullptr,&context))) {
+            if(warp) throw std::runtime_error("Required WARP device unavailable");
             std::cout<<"SKIP: hardware shared device unavailable\n"; return 77;
         }
+        ComPtr<IDXGIDevice> dxgi; throw_if_failed(device.As(&dxgi),"DXGI device");
+        ComPtr<IDXGIAdapter> adapter; throw_if_failed(dxgi->GetAdapter(&adapter),"adapter");
+        DXGI_ADAPTER_DESC gpu{}; adapter->GetDesc(&gpu);
+        std::wcout<<L"Pipeline adapter: "<<gpu.Description<<L" (WARP requested="<<warp<<L")\n";
         SECURITY_ATTRIBUTES security{sizeof(security),nullptr,TRUE};
         D3D11_TEXTURE2D_DESC desc{};
         desc.Width=64; desc.Height=32; desc.ArraySize=desc.MipLevels=1; desc.SampleDesc.Count=1;
@@ -42,7 +49,9 @@ int wmain(int argc,wchar_t** argv) {
         auto number=[](HANDLE h){return std::to_wstring(reinterpret_cast<uintptr_t>(h));};
         std::wstring command=L"\""+std::wstring(argv[1])+L"\" "+std::to_wstring(GetCurrentProcessId())+L" "+
             number(input_handle)+L" "+number(output_handle)+L" "+number(mapping)+L" "+number(ready);
+        if(warp) command+=L" --warp-test";
         STARTUPINFOW startup{sizeof(startup)}; Child child;
+        SharedCopyCompletion completion;
         if (!CreateProcessW(argv[1],command.data(),nullptr,nullptr,TRUE,CREATE_NO_WINDOW,nullptr,nullptr,&startup,&child.info))
             throw std::runtime_error("start test worker");
         auto submit=[&](uint64_t sequence,bool valid=true) {
@@ -51,20 +60,25 @@ int wmain(int argc,wchar_t** argv) {
             context->UpdateSubresource(input.Get(),0,nullptr,pixels.data(),64*4,0);
             state->payload={}; state->payload.frame_sequence=sequence;
             state->payload.flags=valid?temporal_valid:0;
-            MemoryBarrier(); input_mutex->ReleaseSync(1);
+            MemoryBarrier(); throw_if_failed(completion.wait(context.Get()),"input complete"); input_mutex->ReleaseSync(1);
         };
         auto consume=[&]() {
             if (output_mutex->AcquireSync(1,5000)!=S_OK) throw std::runtime_error("output timeout");
             const auto sequence=state->output_frame_sequence;
             context->CopyResource(readback.Get(),output.Get());
+            throw_if_failed(completion.wait(context.Get()),"output complete");
             output_mutex->ReleaseSync(0);
             D3D11_MAPPED_SUBRESOURCE mapped{};
             throw_if_failed(context->Map(readback.Get(),0,D3D11_MAP_READ,0,&mapped),"read output");
             bool matches=true;
+            const uint32_t first=*static_cast<const uint32_t*>(mapped.pData);
             for (UINT y=0;y<32;++y) for (UINT x=0;x<64;++x)
                 matches &= reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(mapped.pData)+y*mapped.RowPitch)[x]==(0xff000000u|sequence);
             context->Unmap(readback.Get(),0);
-            if (!matches) throw std::runtime_error("pixel and metadata frame mismatch");
+            if (!matches) {
+                std::cerr<<"expected sequence="<<sequence<<" first pixel="<<std::hex<<first<<std::dec<<'\n';
+                throw std::runtime_error("pixel and metadata frame mismatch");
+            }
             return sequence;
         };
         submit(1);

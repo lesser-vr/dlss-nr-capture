@@ -22,7 +22,7 @@ needed the existing bounded post-report cleanup for stalled runtime shutdown.
 Update 2026-09-05: GPU-native capture is now an opt-in saved menu option and
 the worker uses bounded input/processing/output buffers with paired metadata.
 The earlier deferred statements above describe the prior batch, not the current
-implementation. Flow-default decision, eight-suite coverage and limitations:
+implementation. Flow-default decision, nine-suite coverage and limitations:
 [GPU capture pipeline](gpu-capture-pipeline.md).
 
 - NR shutdown: paired snippet shutdown and explicit global GPU resource cleanup
