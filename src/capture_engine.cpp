@@ -1,4 +1,5 @@
 #include "capture_engine.hpp"
+#include "av_sync.hpp"
 
 #include <mfapi.h>
 #include <mferror.h>
@@ -12,17 +13,6 @@ namespace {
 uint8_t clamp_byte(int value)
 {
     return static_cast<uint8_t>(std::clamp(value, 0, 255));
-}
-
-void write_yuv_pixel(uint8_t y, uint8_t u, uint8_t v, uint8_t* target)
-{
-    const int c = std::max(0, static_cast<int>(y) - 16);
-    const int d = static_cast<int>(u) - 128;
-    const int e = static_cast<int>(v) - 128;
-    target[0] = clamp_byte((298 * c + 541 * d + 128) >> 8);
-    target[1] = clamp_byte((298 * c - 55 * d - 136 * e + 128) >> 8);
-    target[2] = clamp_byte((298 * c + 459 * e + 128) >> 8);
-    target[3] = 255;
 }
 
 bool is_supported_format(const GUID& subtype)
@@ -196,6 +186,10 @@ void CaptureEngine::start(const CaptureDevice& device, const CaptureMode& mode,
                     "Get selected native capture mode");
     throw_if_failed(reader->SetCurrentMediaType(video_stream, nullptr, selected.Get()),
                     "Set selected native capture mode");
+    ComPtr<IMFMediaType> negotiated;
+    throw_if_failed(reader->GetCurrentMediaType(video_stream,&negotiated),"Read capture color metadata");
+    color_=CaptureColor::read(negotiated.Get(),mode.subtype==MFVideoFormat_RGB24 || mode.subtype==MFVideoFormat_RGB32 || mode.subtype==MFVideoFormat_ARGB32 || mode.subtype==MFVideoFormat_MJPG);
+    if(color_.load().unsupported) {source->Shutdown();device.activation->ShutdownObject();throw std::runtime_error("HDR/BT.2020 or unsupported color range is not supported. Set the source to BT.601/709 SDR.");}
 
     PixelFormat selected_format = PixelFormat::bgra;
     if (mode.subtype == MFVideoFormat_RGB24) selected_format = PixelFormat::bgr24;
@@ -215,6 +209,7 @@ void CaptureEngine::start(const CaptureDevice& device, const CaptureMode& mode,
         width_ = mode.width;
         height_ = mode.height;
         pixel_format_ = selected_format;
+        active_subtype_=mode.subtype;
         sequence_ = 0;
         running_ = true;
     }
@@ -264,6 +259,8 @@ bool CaptureEngine::convert_to_bgra(PixelFormat format, const uint8_t* source, s
                                     uint32_t width, uint32_t height,
                                     std::vector<uint8_t>& output)
 {
+    const auto color=color_.load();
+    const auto write_yuv_pixel=[color](uint8_t y,uint8_t u,uint8_t v,uint8_t* p){color.yuv(y,u,v,p);};
     if (!source || width == 0 || height == 0)
         return false;
     if (format == PixelFormat::mjpg) {
@@ -295,6 +292,8 @@ bool CaptureEngine::convert_to_bgra(PixelFormat format, const uint8_t* source, s
             memcpy(output.data() + static_cast<size_t>(y) * width * 4,
                    source + static_cast<size_t>(y) * pitch,
                    static_cast<size_t>(width) * 4);
+        if(color.rgb && !color.full)
+            for(size_t i=0;i<output.size();i++)if(i%4!=3)output[i]=clamp_byte((int(output[i])-16)*255/219);
         return true;
     }
     if (format == PixelFormat::bgr24) {
@@ -309,6 +308,7 @@ bool CaptureEngine::convert_to_bgra(PixelFormat format, const uint8_t* source, s
                 target[1] = row[static_cast<size_t>(x) * 3 + 1];
                 target[2] = row[static_cast<size_t>(x) * 3 + 2];
                 target[3] = 255;
+                if(color.rgb && !color.full)for(int c=0;c<3;c++)target[c]=clamp_byte((int(target[c])-16)*255/219);
             }
         }
         return true;
@@ -368,6 +368,15 @@ bool CaptureEngine::convert_to_bgra(PixelFormat format, const uint8_t* source, s
 HRESULT CaptureEngine::OnReadSample(HRESULT status, DWORD, DWORD flags,
                                     LONGLONG timestamp, IMFSample* sample)
 {
+    if(flags&MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED){
+        ComPtr<IMFSourceReader> reader;{std::scoped_lock lock(mutex_);if(!running_)return S_OK;reader=reader_;}
+        ComPtr<IMFMediaType> type;GUID subtype{};UINT w{},h{};
+        if(!reader || FAILED(reader->GetCurrentMediaType(video_stream,&type)) || FAILED(type->GetGUID(MF_MT_SUBTYPE,&subtype))) {report_error(E_FAIL,L"Capture format changed");return S_OK;}
+        color_=CaptureColor::read(type.Get(),subtype==MFVideoFormat_RGB24 || subtype==MFVideoFormat_RGB32 || subtype==MFVideoFormat_ARGB32 || subtype==MFVideoFormat_MJPG);
+        MFGetAttributeSize(type.Get(),MF_MT_FRAME_SIZE,&w,&h);
+        bool changed=false;{std::scoped_lock lock(mutex_);changed=w!=width_ || h!=height_ || subtype!=active_subtype_;}
+        if(color_.load().unsupported || changed){report_error(E_INVALIDARG,L"Capture changed to unsupported color or dimensions; select SDR mode");return S_OK;}
+    }
     if (FAILED(status)) {
         report_error(status, L"Capture callback");
         return S_OK;
@@ -375,6 +384,7 @@ HRESULT CaptureEngine::OnReadSample(HRESULT status, DWORD, DWORD flags,
 
     if ((flags & MF_SOURCE_READERF_STREAMTICK) == 0 && sample) {
         const uint64_t arrival = GetTickCount64();
+        const uint64_t arrival_qpc=capture_qpc_100ns();
         unsigned next_path=!gpu_requested_.load()?2u:!gpu_allowed_.load()?3u:4u;
         if (gpu_device_ && gpu_requested_.load() && gpu_allowed_.load()) {
             std::scoped_lock gpu_lock(gpu_mutex_);
@@ -384,13 +394,14 @@ HRESULT CaptureEngine::OnReadSample(HRESULT status, DWORD, DWORD flags,
             UINT subresource{};
             VideoFrame frame;
             FrameCallback callback;
+            frame.gpu_flipped=gpu_flip_.load();
             if (SUCCEEDED(sample->GetBufferByIndex(0, &native)) &&
                 SUCCEEDED(native.As(&dxgi)) &&
                 SUCCEEDED(dxgi->GetResource(IID_PPV_ARGS(&texture))) &&
                 SUCCEEDED(dxgi->GetSubresourceIndex(&subresource))) {
               next_path=5;
               if (gpu_converter_.convert(gpu_device_.Get(), texture.Get(), subresource,
-                    frame.gpu, frame.bgra, frame.analysis_height)) {
+                    frame.gpu, frame.bgra, frame.analysis_height,color_.load(),frame.gpu_flipped)) {
                 {
                     std::scoped_lock lock(mutex_);
                     frame.width = width_; frame.height = height_;
@@ -403,6 +414,7 @@ HRESULT CaptureEngine::OnReadSample(HRESULT status, DWORD, DWORD flags,
                     path_=1;
                     frame.timestamp_100ns = timestamp;
                     frame.arrival_tick_ms = arrival;
+                    frame.arrival_qpc_100ns=arrival_qpc;
                     if (callback) { ++gpu_frames_; callback(std::move(frame)); }
                     request_next();
                     return S_OK;
@@ -429,6 +441,7 @@ HRESULT CaptureEngine::OnReadSample(HRESULT status, DWORD, DWORD flags,
                 }
                 frame.timestamp_100ns = timestamp;
                 frame.arrival_tick_ms = arrival;
+                frame.arrival_qpc_100ns=arrival_qpc;
                 if (convert_to_bgra(format, bytes, length, frame.width, frame.height, frame.bgra) && callback) {
                     path_=next_path;
                     ++cpu_frames_;

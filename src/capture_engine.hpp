@@ -48,16 +48,21 @@ public:
     void start(const CaptureDevice& device, const CaptureMode& mode,
                FrameCallback on_frame, ErrorCallback on_error);
     void stop();
-    void set_gpu_device(ID3D11Device* device) { gpu_device_ = device; }
+    void set_gpu_device(ID3D11Device* device) {
+        std::scoped_lock lock(gpu_mutex_);
+        gpu_converter_=GpuCaptureConverter{};gpu_manager_.Reset();gpu_device_=device;
+    }
     void set_gpu_allowed(bool allowed) { gpu_allowed_.store(allowed); }
     void set_gpu_requested(bool requested) { gpu_requested_.store(requested); }
+    void set_gpu_flip(bool flip) {gpu_flip_=flip;}
+    std::wstring color_status() const {return color_.load().label();}
     uint64_t gpu_frames() const { return gpu_frames_.load(); }
     uint64_t cpu_frames() const { return cpu_frames_.load(); }
     const wchar_t* path_status() const {
         switch (path_.load()) {
         case 1: return L"GPU native";
         case 2: return L"CPU: GPU capture disabled";
-        case 3: return L"CPU: flip or history overlay enabled";
+        case 3: return L"CPU: history overlay enabled";
         case 4: return L"CPU: driver supplied system-memory sample";
         case 5: return L"CPU: GPU conversion unavailable or buffers busy";
         case 6: return L"CPU: native surface dimensions mismatch";
@@ -79,6 +84,8 @@ private:
     std::atomic<bool> gpu_requested_{};
     std::atomic<uint64_t> gpu_frames_{}, cpu_frames_{};
     std::atomic<unsigned> path_{};
+    std::atomic<CaptureColor> color_{};
+    std::atomic<bool> gpu_flip_{};
     ComPtr<IMFDXGIDeviceManager> gpu_manager_;
     GpuCaptureConverter gpu_converter_;
     std::mutex gpu_mutex_;
@@ -100,6 +107,7 @@ private:
     uint32_t width_{};
     uint32_t height_{};
     PixelFormat pixel_format_{PixelFormat::bgra};
+    GUID active_subtype_{};
     uint64_t sequence_{};
     bool running_{};
 };

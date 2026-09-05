@@ -1,6 +1,7 @@
 #include "gpu_capture.hpp"
 #include "frame_processor.hpp"
 #include "gpu_capture_matrix.hpp"
+#include "capture_color_checks.hpp"
 #include <mfapi.h>
 #include <mfobjects.h>
 #include <iostream>
@@ -119,6 +120,7 @@ int main() {
             }
         }
         check_capture_matrix(device.Get(),context.Get());
+        check_capture_colors(device.Get(),context.Get());
         MFShutdown();
         std::cout << "GPU capture: array slice, full/small color, 3 leases, reuse and analysis passed\n";
         return 0;

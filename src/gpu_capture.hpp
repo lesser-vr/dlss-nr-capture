@@ -1,6 +1,8 @@
 #pragma once
 #include "common.hpp"
 #include <d3d11.h>
+#include <d3d11_1.h>
+#include "capture_color.hpp"
 #include <d3d10.h>
 #include <algorithm>
 #include <cstring>
@@ -28,7 +30,8 @@ class GpuCaptureConverter {
 public:
     bool convert(ID3D11Device* device, ID3D11Texture2D* source, UINT subresource,
                  std::shared_ptr<GpuCaptureSurface>& surface, std::vector<uint8_t>& analysis,
-                 UINT& analysis_height) {
+                 UINT& analysis_height, CaptureColor color={}, bool flip=false) {
+        if(color.unsupported) return false;
         if (!device || !source) return false;
         ComPtr<ID3D10Multithread> protection;
         if (FAILED(device->QueryInterface(IID_PPV_ARGS(&protection)))) return false;
@@ -85,10 +88,17 @@ public:
         RECT src{0,0,static_cast<LONG>(width_),static_cast<LONG>(height_)};
         video_context_->VideoProcessorSetStreamSourceRect(processor_.Get(),0,TRUE,&src);
         video_context_->VideoProcessorSetStreamAutoProcessingMode(processor_.Get(),0,FALSE);
+        ComPtr<ID3D11VideoContext1> video1;
+        if(SUCCEEDED(video_context_.As(&video1))) {
+            D3D11_VIDEO_PROCESSOR_CAPS caps{};
+            if(flip && (FAILED(enumerator_->GetVideoProcessorCaps(&caps)) || !(caps.FeatureCaps&D3D11_VIDEO_PROCESSOR_FEATURE_CAPS_MIRROR))) return false;
+            video1->VideoProcessorSetStreamMirror(processor_.Get(),0,flip,FALSE,flip);
+        } else if(flip) return false;
         D3D11_VIDEO_PROCESSOR_COLOR_SPACE input_color{};
-        input_color.YCbCr_Matrix = 1; // BT.709, matching capture conversion.
+        input_color.YCbCr_Matrix = color.bt601?0:1;
+        input_color.RGB_Range=color.rgb && !color.full?1:0;
         input_color.Nominal_Range = (format_ == DXGI_FORMAT_NV12 || format_ == DXGI_FORMAT_P010)
-            ? D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235 : D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255;
+            ? (color.full?D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255:D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235) : (color.rgb && !color.full?D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_16_235:D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255);
         D3D11_VIDEO_PROCESSOR_COLOR_SPACE output_color{};
         output_color.Nominal_Range = D3D11_VIDEO_PROCESSOR_NOMINAL_RANGE_0_255;
         video_context_->VideoProcessorSetStreamColorSpace(processor_.Get(),0,&input_color);

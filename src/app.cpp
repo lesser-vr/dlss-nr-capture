@@ -235,6 +235,8 @@ void App::load_settings()
     uint32_t value{};
     if (read_dword(L"AudioDelayMs", value)) audio_delay_ms_ = std::min(value, 200u);
     audio_capture_->set_delay_ms(audio_delay_ms_);
+    if(read_dword(L"AudioAutoSync",value)) audio_sync_enabled_=value!=0;
+    audio_capture_->set_sync_enabled(audio_sync_enabled_);
     if (read_dword(L"NrEnabled", value)) nr_enabled_ = value != 0;
     if (read_dword(L"NrTemporal", value)) nr_temporal_enabled_ = value != 0;
     if (read_dword(L"NrStyle", value)) nr_style_ = std::min(value, 3u);
@@ -266,6 +268,7 @@ void App::save_settings()
     write_string(L"AudioDevice", audio_expected_ ? reconnect_audio_name_ : L"");
     write_string(L"AudioDeviceId", audio_expected_ ? reconnect_audio_id_ : L"");
     write_dword(L"AudioDelayMs", audio_delay_ms_);
+    write_dword(L"AudioAutoSync",audio_sync_enabled_?1u:0u);
     if (active_mode_ || (capture_expected_ && reconnect_mode_)) {
         const auto& mode = active_mode_ ? modes_[*active_mode_] : *reconnect_mode_;
         write_string(L"VideoFormat", mode.format_name);
@@ -426,6 +429,7 @@ void App::rebuild_audio_menu()
         AppendMenuW(audio_menu_, MF_STRING | MF_GRAYED, 0, (L"Waiting: " + reconnect_audio_name_).c_str());
     AppendMenuW(audio_menu_, MF_SEPARATOR, 0, nullptr);
     const uint32_t delays[] = {0, 25, 50, 100, 200};
+    AppendMenuW(audio_menu_,MF_STRING | (audio_sync_enabled_?MF_CHECKED:0),48020,L"Automatic A/V sync (experimental)");
     for (UINT i = 0; i < 5; ++i)
         AppendMenuW(audio_menu_, MF_STRING | (audio_delay_ms_ == delays[i] ? MF_CHECKED : 0),
                     audio_delay_base + i, (L"Audio delay: " + std::to_wstring(delays[i]) + L" ms").c_str());
@@ -589,7 +593,8 @@ bool App::handle_mode_wheel(WPARAM wparam)
 void App::set_vertical_flip(bool enabled)
 {
     flip_vertical_.store(enabled, std::memory_order_relaxed);
-    capture_->set_gpu_allowed(!enabled && !history_overlay_enabled_);
+    capture_->set_gpu_flip(enabled);
+    capture_->set_gpu_allowed(!history_overlay_enabled_);
     CheckMenuItem(image_menu_, flip_vertical_command,
                   MF_BYCOMMAND | (enabled ? MF_CHECKED : MF_UNCHECKED));
     save_settings();
@@ -1036,6 +1041,7 @@ void App::stop_nr_worker()
 
 void App::restart_nr_worker(uint32_t width, uint32_t height)
 {
+    audio_capture_->reset_sync();
     stop_nr_worker();
     worker_expected_ = true;
     last_worker_restart_ms_ = GetTickCount64();
@@ -1126,7 +1132,7 @@ void App::set_nr_enabled(bool enabled)
 void App::set_history_overlay(bool enabled)
 {
     history_overlay_enabled_ = enabled;
-    capture_->set_gpu_allowed(!enabled && !flip_vertical_.load());
+    capture_->set_gpu_allowed(!enabled);
     processor_->set_debug_overlay(enabled);
     CheckMenuItem(processing_menu_, history_overlay_command,
                   MF_BYCOMMAND | (enabled ? MF_CHECKED : MF_UNCHECKED));
@@ -1136,8 +1142,8 @@ void App::enqueue_frame(VideoFrame&& frame)
 {
     last_capture_frame_ms_.store(GetTickCount64());
     if (suppress_test_frames_) return;
-    if (frame.gpu && flip_vertical_.load(std::memory_order_relaxed)) return;
-    if (flip_vertical_.load(std::memory_order_relaxed) && frame.height > 1) {
+    if (frame.gpu && frame.gpu_flipped!=flip_vertical_.load(std::memory_order_relaxed)) return;
+    if (!frame.gpu && flip_vertical_.load(std::memory_order_relaxed) && frame.height > 1) {
         const size_t row_bytes = static_cast<size_t>(frame.width) * 4;
         for (uint32_t top = 0, bottom = frame.height - 1; top < bottom; ++top, --bottom)
             std::swap_ranges(frame.bgra.begin() + static_cast<size_t>(top) * row_bytes,
@@ -1163,9 +1169,11 @@ void App::update_title()
     title += L" — " + nr_worker_status();
     title += L" | capture GPU/CPU " + std::to_wstring(capture_->gpu_frames()) + L"/" + std::to_wstring(capture_->cpu_frames());
     title += L" | " + std::wstring(capture_->path_status());
+    if(graphics_recoveries_) title+=L" | graphics recoveries "+std::to_wstring(graphics_recoveries_);
     if (capture_recovery_attempts_) title += L" | capture reconnects " + std::to_wstring(capture_recovery_attempts_);
     if (audio_expected_ && audio_failed_) title += L" | Audio reconnect pending: " + audio_recovery_error_;
     if (audio_recovery_attempts_) title += L" | audio reconnects " + std::to_wstring(audio_recovery_attempts_);
+    if(audio_expected_) title+=L" | audio packets "+std::to_wstring(audio_capture_->output_packets());
     const uint64_t received = received_frames_.load(std::memory_order_relaxed);
     const uint64_t dropped = dropped_frames_.load(std::memory_order_relaxed);
     if (received) {
@@ -1212,6 +1220,7 @@ void App::copy_diagnostics()
     report.add(L"Worker wait ms", nr_wait_ms_);
     report.add(L"Received frames", received_frames_.load());
     report.add(L"GPU capture requested", gpu_capture_enabled_ ? L"yes" : L"no");
+    report.add(L"Capture color",capture_->color_status());
     report.add(L"Current capture path / fallback reason", capture_->path_status());
     if (temporal_state_) {
         report.add(L"Flow mode (0 inactive, 1 GPU, 2 CPU, 3 recovered CPU)",
@@ -1236,6 +1245,9 @@ void App::copy_diagnostics()
     report.add(L"Last capture recovery error", capture_recovery_error_);
     report.add(L"Audio selected", audio_expected_ ? reconnect_audio_name_ : L"Off");
     report.add(L"Audio delay ms", audio_delay_ms_);
+    report.add(L"Automatic A/V sync",audio_sync_enabled_?L"enabled (arrival-aligned estimate)":L"disabled");
+    report.add(L"Estimated additional A/V delay ms",audio_capture_->sync_delay_ms());
+    report.add(L"Audio packets submitted",audio_capture_->output_packets());
     report.add(L"Audio reconnect attempts", audio_recovery_attempts_);
     report.add(L"Last audio recovery error", audio_recovery_error_);
     report.add(L"Event log", event_log_.path());
@@ -1293,6 +1305,32 @@ void App::show_error(const std::wstring& message)
     update_title();
     MessageBoxW(window_, message.c_str(), L"DLSS NR Capture error", MB_OK | MB_ICONERROR);
 }
+void App::ensure_graphics_health()
+{
+    if(suspended_) return;
+    if(renderer_.device() && FAILED(renderer_.device()->GetDeviceRemovedReason())) graphics_failed_=true;
+    if(!graphics_failed_) return;
+    const auto now=GetTickCount64();
+    if(last_graphics_retry_ && now-last_graphics_retry_<5000) return;
+    last_graphics_retry_=now;
+    event_log_.append(L"Recreating graphics/capture devices");
+    try {
+        ++capture_generation_;
+        driver_call(window_,[&]{capture_->stop();});stop_nr_worker();
+        {std::scoped_lock lock(frame_mutex_);pending_frame_.reset();}
+        capture_->set_gpu_device(nullptr);
+        renderer_.reset();renderer_.initialize(window_);
+        renderer_.set_worker_wait_ms(nr_wait_ms_);capture_->set_gpu_device(renderer_.device());
+        graphics_failed_=false;++graphics_recoveries_;
+        if(active_mode_) {
+            reconnecting_capture_=true;start_capture_mode(*active_mode_);reconnecting_capture_=false;
+        }
+        if(capture_expected_ && !capture_failed_) renderer_.show_notification(L"CAPTURE RESTORED");
+    } catch(const std::exception& error) {
+        reconnecting_capture_=false;graphics_failed_=true;
+        event_log_.append(L"Graphics recovery pending: "+widen(error.what()));
+    }
+}
 LRESULT CALLBACK App::window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
 {
     App* app = reinterpret_cast<App*>(GetWindowLongPtrW(window, GWLP_USERDATA));
@@ -1330,14 +1368,30 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         if (message == WM_COMMAND || message == WM_TIMER || message == WM_MOUSEWHEEL || message == frame_ready_message) return 0;
     }
     switch (message) {
+    case WM_APP+45:
+        if(isolated_test_settings_) {graphics_failed_=true;last_graphics_retry_=0;}
+        return 0;
+    case WM_POWERBROADCAST:
+        if(wparam==PBT_APMSUSPEND) {
+            suspended_=true;capture_power_.update(false);++capture_generation_;
+            driver_call(window_,[&]{capture_->stop();});stop_nr_worker();audio_capture_->stop();
+        } else if(wparam==PBT_APMRESUMEAUTOMATIC || wparam==PBT_APMRESUMESUSPEND) {
+            suspended_=false;graphics_failed_=true;last_graphics_retry_=0;
+            if(audio_expected_){audio_failed_=true;last_audio_retry_ms_=0;}
+        }
+        return TRUE;
     case WM_TIMER:
         if (wparam == health_timer_id) {
+            ensure_graphics_health();
+            if(suspended_ || graphics_failed_) return 0;
             capture_interrupted_ = capture_expected_ && capture_input_interrupted(
                 GetTickCount64(), capture_started_ms_, last_capture_frame_ms_.load(), capture_failed_);
             renderer_.set_capture_interrupted(capture_interrupted_);
             update_capture_power();
             update_performance_overlay();
-            if (capture_interrupted_) renderer_.redraw_idle();
+            if (capture_interrupted_) {
+                try {renderer_.redraw_idle();}catch(const std::exception& error){graphics_failed_=true;event_log_.append(L"Idle render failed: "+widen(error.what()));return 0;}
+            }
             if (auto diagnostic = renderer_.take_diagnostic(); !diagnostic.empty())
                 event_log_.append(diagnostic);
             ensure_capture_health();
@@ -1348,6 +1402,7 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         }
         break;
     case frame_ready_message: {
+        if(suspended_ || graphics_failed_) return 0;
         std::optional<VideoFrame> frame;
         { std::scoped_lock lock(frame_mutex_); frame.swap(pending_frame_); }
         if (frame) {
@@ -1360,7 +1415,11 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             renderer_.set_worker_processing_time_us(nr_processing_us);
             capture_interrupted_ = capture_failed_;
             renderer_.set_capture_interrupted(capture_interrupted_);
-            renderer_.render(*frame);
+            try { renderer_.render(*frame); }
+            catch(const std::exception& error){
+                graphics_failed_=true;event_log_.append(L"Render failed: "+widen(error.what()));return 0;
+            }
+            if(renderer_.presented()) audio_capture_->observe_video(frame->timestamp_100ns,frame->arrival_qpc_100ns,capture_qpc_100ns());
             update_capture_power();
             if (auto diagnostic = renderer_.take_diagnostic(); !diagnostic.empty())
                 event_log_.append(diagnostic);
@@ -1434,6 +1493,7 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         break;
     }
     case WM_COMMAND: {
+        if(suspended_ || graphics_failed_) return 0;
         const UINT command = LOWORD(wparam);
         if (command == passthrough_command) { set_motion_analysis(false); return 0; }
         if (command == motion_analysis_command) { set_motion_analysis(true); return 0; }
@@ -1491,6 +1551,7 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             return 0;
         }
         if (command == audio_off_command) { start_audio_capture(audio_devices_.size()); return 0; }
+        if(command==48020){audio_sync_enabled_=!audio_sync_enabled_;audio_capture_->set_sync_enabled(audio_sync_enabled_);rebuild_audio_menu();save_settings();return 0;}
         if (command >= audio_delay_base && command < audio_delay_base + 5) {
             const uint32_t delays[] = {0, 25, 50, 100, 200};
             audio_delay_ms_ = delays[command - audio_delay_base];

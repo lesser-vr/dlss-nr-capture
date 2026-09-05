@@ -79,6 +79,7 @@ public:
             it = pending_.erase(it);
         }
     }
+    size_t queued_bytes() const {return bytes_;}
 private:
     Backend& backend_;
     size_t limit_, bytes_{};

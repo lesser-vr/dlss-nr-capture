@@ -21,6 +21,9 @@ public:
     int run(HINSTANCE instance, int show_command);
 
 private:
+    void ensure_graphics_health();
+    bool graphics_failed_{}, suspended_{};
+    uint64_t graphics_recoveries_{}, last_graphics_retry_{};
     void update_capture_power();
     CapturePowerRequest capture_power_;
     bool prevent_capture_sleep_{true};
@@ -156,6 +159,7 @@ private:
     bool audio_expected_{};
     bool audio_failed_{};
     uint32_t audio_delay_ms_{};
+    bool audio_sync_enabled_{};
     std::wstring reconnect_audio_id_;
     std::wstring reconnect_audio_name_;
     std::wstring audio_recovery_error_;

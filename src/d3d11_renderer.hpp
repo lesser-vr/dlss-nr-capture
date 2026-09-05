@@ -18,6 +18,8 @@ class D3D11Renderer {
 public:
     ~D3D11Renderer();
     void initialize(HWND window);
+    void reset();
+    bool presented() const {return presented_;}
     ID3D11Device* device() const noexcept { return device_.Get(); }
     void resize(uint32_t width, uint32_t height);
     void render(const VideoFrame& frame);
@@ -53,6 +55,7 @@ public:
     void set_worker_processing_time_us(uint64_t value) noexcept { worker_processing_time_us_ = value; }
 
 private:
+    bool presented_{};
     WorkerTemporalState* temporal_state_{};
     void present(UINT interval, UINT flags);
     BlackoutProbe blackout_probe_;

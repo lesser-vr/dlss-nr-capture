@@ -3,6 +3,13 @@
 
 #include <algorithm>
 #include <d3dcompiler.h>
+#include <new>
+
+void D3D11Renderer::reset() {
+    // Caller has stopped capture and the worker and released all borrowed views.
+    this->~D3D11Renderer();
+    new(this) D3D11Renderer();
+}
 
 D3D11Renderer::~D3D11Renderer()
 {
@@ -433,6 +440,7 @@ void D3D11Renderer::redraw_idle()
 void D3D11Renderer::present(UINT interval, UINT flags)
 {
     const HRESULT hr = swap_chain_->Present(interval, flags);
+    presented_=hr==S_OK;
     // A busy nonblocking present is a dropped presentation, not device removal.
     if (hr != DXGI_ERROR_WAS_STILL_DRAWING && hr != last_present_result_) {
         wchar_t text[160]{};

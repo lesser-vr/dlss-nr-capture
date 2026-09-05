@@ -4,6 +4,7 @@ param(
  [switch]$ExpectCpu,
  [switch]$Transitions,
  [string]$DeviceName='',
+ [string]$AudioDeviceName='',
  [ValidateSet('NV12','P010','RGB24','RGB32','ARGB32','MJPG','YUY2','UYVY')][string]$Format='NV12',
  [ValidateRange(16,8192)][int]$Width=1920,
  [ValidateRange(16,8192)][int]$Height=1080,
@@ -72,6 +73,10 @@ try {
  $env:DLSS_NR_GPU_CAPTURE=if($GpuCapture){'1'}else{'0'}
  New-Item -Path $keyPs -Force | Out-Null
  if($DeviceName){New-ItemProperty -LiteralPath $keyPs -Name VideoDevice -Value $DeviceName -PropertyType String | Out-Null}
+ if($AudioDeviceName){
+  New-ItemProperty -LiteralPath $keyPs -Name AudioDevice -Value $AudioDeviceName -PropertyType String | Out-Null
+  New-ItemProperty -LiteralPath $keyPs -Name AudioAutoSync -Value 1 -PropertyType DWord | Out-Null
+ }
  foreach($item in @{NrEnabled=1;NrTemporal=1;Width=$Width;Height=$Height;FpsNumerator=$Fps;FpsDenominator=1;FlipVertical=0}.GetEnumerator()) {
   New-ItemProperty -LiteralPath $keyPs -Name $item.Key -Value $item.Value -PropertyType DWord | Out-Null
  }
@@ -106,21 +111,31 @@ try {
   Select-Menu 2 '2560x1440'; Wait-Path '1440p' 'GPU native' @{Width=2560;Height=1440}
   Select-Menu 2 '1920x1080'; Wait-Path '1080p' 'GPU native' @{Width=1920;Height=1080}
   Select-Menu 1 'P010'; Wait-Path 'P010' 'GPU native' @{VideoFormat='P010'}
-  Select-Menu 1 'RGB24'; Wait-Path 'RGB24 automatic flip' 'CPU: flip or history overlay enabled' @{VideoFormat='RGB24';FlipVertical=1}
+  Select-Menu 1 'RGB24'; Wait-Path 'RGB24 automatic flip' 'CPU: driver supplied system-memory sample' @{VideoFormat='RGB24';FlipVertical=1}
   Post-Command 44000; Wait-Path 'RGB24 CPU fallback without flip' 'CPU: driver supplied system-memory sample' @{FlipVertical=0}
   Select-Menu 1 'MJPG'; Wait-Path 'MJPG CPU fallback' 'CPU: driver supplied system-memory sample' @{VideoFormat='MJPG'}
   Select-Menu 1 'NV12'; Wait-Path 'NV12 GPU return' 'GPU native' @{VideoFormat='NV12'}
-  Post-Command 44000; Wait-Path 'flip CPU fallback' 'CPU: flip or history overlay enabled' @{FlipVertical=1}
+  Post-Command 44000; Wait-Path 'GPU flip' 'GPU native' @{FlipVertical=1}
   Post-Command 44000; Wait-Path 'flip off GPU return' 'GPU native' @{FlipVertical=0}
-  Post-Command 50002; Wait-Path 'history overlay CPU fallback' 'CPU: flip or history overlay enabled' @{}
+  Post-Command 50002; Wait-Path 'history overlay CPU fallback' 'CPU: history overlay enabled' @{}
   Post-Command 50002; Wait-Path 'history overlay off GPU return' 'GPU native' @{}
   Post-Command 50003; Wait-Path 'GPU capture disabled' 'CPU: GPU capture disabled' @{GpuNativeCapture=0}
   Post-Command 50003; Wait-Path 'GPU capture enabled' 'GPU native' @{GpuNativeCapture=1}
   [void][LiveNrProbe]::PostMessage($window,0x802A,[IntPtr]::Zero,[IntPtr]::Zero)
   Wait-Path 'capture error recovery' 'capture reconnects [1-9][0-9]*' @{VideoFormat='NV12';Width=1920;Height=1080;FlipVertical=0}
+  if(-not $AudioDeviceName){Post-Command 48020}
+  Wait-Path 'automatic AV option' 'GPU native' @{AudioAutoSync=1}
+  [void][LiveNrProbe]::PostMessage($window,0x802D,[IntPtr]::Zero,[IntPtr]::Zero)
+  Wait-Path 'graphics recreation' 'graphics recoveries 1' @{VideoFormat='NV12';Width=1920;Height=1080;AudioAutoSync=1}
+  # Application-only power messages; does not suspend Windows or touch the console.
+  [void][LiveNrProbe]::PostMessage($window,0x218,[IntPtr]4,[IntPtr]::Zero)
+  Start-Sleep -Milliseconds 500
+  [void][LiveNrProbe]::PostMessage($window,0x218,[IntPtr]18,[IntPtr]::Zero)
+  Wait-Path 'application resume' 'graphics recoveries 2' @{VideoFormat='NV12';Width=1920;Height=1080;AudioAutoSync=1}
   $title=Read-Title
  }
  [void][LiveNrProbe]::PostMessage($window,0x10,[IntPtr]::Zero,[IntPtr]::Zero)
+ if($AudioDeviceName -and ($title -notmatch 'audio packets [1-9][0-9]*' -or $title -match 'Audio reconnect pending')){throw "Audio capture/sync did not remain active: $title"}
  if(-not $app.WaitForExit(5000)){throw 'Normal shutdown exceeded 5 seconds'}
  if($app.ExitCode -ne 0){throw "Shutdown failed: $($app.ExitCode)"}
  [pscustomobject]@{mode='background_hardware_capture';gpu_capture=[bool]$GpuCapture;initial_seconds=$Seconds;elapsed_seconds=[Math]::Round($clock.Elapsed.TotalSeconds,2);transitions=[bool]$Transitions;last_title=$title;exit_code=$app.ExitCode}|ConvertTo-Json

@@ -63,23 +63,33 @@ void AudioCapture::capture_loop(AudioCaptureDevice device) {
   AudioClientStop stop_client{client.Get()};
   AudioDelayQueue delayed;
   uint32_t delay = delay_ms_.load();
+  uint64_t epoch=sync_epoch_.load();
   while (!stopping_.load()) {
    const uint32_t requested = delay_ms_.load();
-   if (requested != delay) { delayed.clear(); output.discard(); delay = requested; }
+   const uint64_t current_epoch=sync_epoch_.load();
+   if (requested != delay || epoch!=current_epoch) { delayed.clear(); output.discard(); delay = requested;epoch=current_epoch; }
    output.reap();
    UINT32 packets{}; throw_if_failed(capture->GetNextPacketSize(&packets), "Read audio packet size");
    while (packets > 0 && !stopping_.load()) {
-    BYTE* data{}; UINT32 frames{}; DWORD flags{}; throw_if_failed(capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr), "Read audio packet");
+    BYTE* data{}; UINT32 frames{}; DWORD flags{};UINT64 qpc{};
+    throw_if_failed(capture->GetBuffer(&data, &frames, &flags, nullptr, &qpc), "Read audio packet");
     {
      AudioPacketLease lease{capture.Get(), frames};
-     delayed.push(GetTickCount64(), delay, data, frames * format->nBlockAlign,
+     const uint64_t now=capture_qpc_100ns();
+     if(flags&AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY){delayed.clear();output.discard();sync_clock_.reset();}
+     const bool valid_timestamp=!(flags&AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) && qpc && qpc<=now && now-qpc<2000000;
+     const uint32_t target=std::min(200u,delay+(sync_enabled_?sync_clock_.delay(now):0u));
+     const uint64_t packet_time=sync_enabled_ && valid_timestamp ? qpc/10000:now/10000;
+     delayed.push(packet_time, target, data, frames * format->nBlockAlign,
          (flags & AUDCLNT_BUFFERFLAGS_SILENT) != 0,
-         static_cast<size_t>(format->nAvgBytesPerSec) * (delay + 200) / 1000);
+         static_cast<size_t>(format->nAvgBytesPerSec) * (target + 200) / 1000);
     }
     throw_if_failed(capture->GetNextPacketSize(&packets), "Read next audio packet size");
    }
-   delayed.drain(GetTickCount64(), [&](const auto& bytes) {
+   const uint64_t queued_ms=sync_enabled_?output.queued_bytes()*1000/format->nAvgBytesPerSec:0;
+   delayed.drain(capture_qpc_100ns()/10000+queued_ms, [&](const auto& bytes) {
        output.submit(bytes.data(), static_cast<DWORD>(bytes.size()), false);
+       ++output_packets_;
    });
    std::this_thread::sleep_for(std::chrono::milliseconds(2));
   }

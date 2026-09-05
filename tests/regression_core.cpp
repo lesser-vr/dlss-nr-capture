@@ -1,4 +1,6 @@
 #include "frame_processor.hpp"
+#include "av_sync.hpp"
+#include "capture_color.hpp"
 #include "capture_power.hpp"
 #include "audio_output_checks.hpp"
 #include "audio_health.hpp"
@@ -43,6 +45,20 @@ VideoFrame solid(uint32_t width, uint32_t height, uint8_t value, uint64_t sequen
 }
 
 int wmain(int argc, wchar_t** argv) {
+    {
+        auto c=CaptureColor::from(2,1,0,0);check(c.bt601 && c.full && !c.assumed,"601 full metadata");
+        check(CaptureColor::from(0,0,0,0).assumed,"missing color metadata explicit default");
+        check(CaptureColor::from(1,2,15,0).unsupported,"PQ rejected without tone mapping");
+        check(CaptureColor::from(1,2,16,0).hdr,"HLG identified");
+        check(CaptureColor::from(4,2,0,9).unsupported,"2020 not silently treated as 709");
+        AvSyncClock clock;
+        check(clock.delay(10000000)==0,"AV no video clock fallback");
+        for(int i=0;i<100;i++)clock.observe(i*166666,10000000+i*166666,10200000+i*166666);
+        check(clock.delay(10000000+99*166666)>=17 && clock.delay(10000000+99*166666)<=23,"AV converges to app video latency");
+        check(clock.delay(40000000)==0,"AV stale clock expires");
+        clock.reset();check(clock.delay(40000000)==0,"AV mode change resets clock");
+        clock.observe(0,40000000,40000000);check(clock.delay(40000000)==0,"AV new timestamp epoch");
+    }
     {
         CapturePowerRequest request(fake_power);
         check(request.update(true) && request.active(), "power request activates");
