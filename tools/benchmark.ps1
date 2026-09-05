@@ -3,6 +3,8 @@ param(
   [switch]$Synthetic,
   [switch]$CaptureOutput,
   [switch]$FullResolution,
+  [switch]$GpuCapture,
+  [ValidateRange(0,3)][int]$TestFlowFailure = 0,
   [ValidateRange(1,8192)][int]$QualityWidth = 320,
   [ValidateRange(1,8192)][int]$QualityHeight = 180,
   [ValidateRange(0,8191)][int]$RegionX = 0,
@@ -34,6 +36,8 @@ $OutputDir = [IO.Path]::GetFullPath($OutputDir).TrimEnd('\')
 $arguments = @('--output', $OutputDir, '--warmup', $Warmup, '--frames', $Frames,
     '--style', $Style, '--preset', $Preset, '--intensity', $Intensity, '--temporal', $Temporal)
 if ($CaptureOutput) { $arguments += '--capture-output' }
+if ($GpuCapture) { $arguments += '--gpu-capture' }
+if ($PSBoundParameters.ContainsKey('TestFlowFailure')) { $arguments += @('--test-flow-failure',$TestFlowFailure) }
 if (-not $CaptureOutput -and ($FullResolution -or $QualityWidth -ne 320 -or $QualityHeight -ne 180 -or
     $RegionX -or $RegionY -or $RegionWidth -or $RegionHeight)) { throw 'Quality options require -CaptureOutput' }
 if ($CaptureOutput) {

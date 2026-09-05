@@ -35,10 +35,12 @@ static std::string json(const std::wstring& value) {
 }
 struct Runtime {
     HMODULE module{};
+    HMODULE probe_bridge{};
     const NrAdapterApi* api{};
     ~Runtime() {
         if (api) { std::cerr << "Shutting down adapter...\n"; api->shutdown(); }
         if (module) { std::cerr << "Unloading adapter...\n"; FreeLibrary(module); }
+        if (probe_bridge) FreeLibrary(probe_bridge);
         std::cerr << "Adapter released.\n";
     }
 };
@@ -57,13 +59,14 @@ int wmain(int argc, wchar_t** argv) {
                     "[--frames 300] [--warmup 120] [--style 1] [--preset 3] [--intensity 100] [--temporal 1] [--warp] [--capture-output]\n"
                     "Offline sequential benchmark; no capture/presentation, no real-time drop or fallback measurement.\n";
                 std::cout << "--full-resolution or --quality-width/--quality-height; optional --quality-x/--quality-y/--quality-region-width/--quality-region-height\n";
+                std::cout << "--gpu-capture replays decoded BGRA through native conversion/analysis (not hardware capture); --test-flow-failure 0..3 is an isolated recovery probe\n";
                 return 0;
             }
-            if (key == L"--synthetic" || key == L"--warp" || key == L"--capture-output" || key == L"--full-resolution") args[key] = L"1";
+            if (key == L"--synthetic" || key == L"--warp" || key == L"--capture-output" || key == L"--full-resolution" || key == L"--gpu-capture") args[key] = L"1";
             else if (key == L"--input" || key == L"--output" || key == L"--adapter" || key == L"--frames" ||
                      key == L"--warmup" || key == L"--style" || key == L"--preset" || key == L"--intensity" || key == L"--temporal" ||
                      key == L"--quality-width" || key == L"--quality-height" || key == L"--quality-x" || key == L"--quality-y" ||
-                     key == L"--quality-region-width" || key == L"--quality-region-height") {
+                     key == L"--quality-region-width" || key == L"--quality-region-height" || key == L"--test-flow-failure") {
                 if (++i == argc) throw std::runtime_error("Missing option value");
                 args[key] = argv[i];
             } else throw std::runtime_error("Unknown option (see --help)");
@@ -77,6 +80,8 @@ int wmain(int argc, wchar_t** argv) {
         const unsigned frames = number(L"--frames", 300, 1, 1000000), warmup = number(L"--warmup", 120, 0, 1000000);
         const unsigned style = number(L"--style", 1, 0, 3), preset = number(L"--preset", 3, 1, 4);
         const unsigned intensity = number(L"--intensity", 100, 25, 100), temporal = number(L"--temporal", 1, 0, 1);
+        const unsigned flow_failure=number(L"--test-flow-failure",0,0,3);
+        const bool gpu_capture=args.count(L"--gpu-capture")!=0;
         if (!args.count(L"--output") || (args.count(L"--input") + args.count(L"--synthetic") != 1))
             throw std::runtime_error("Specify --output and exactly one of --input / --synthetic");
         const fs::path output = fs::absolute(args.at(L"--output"));
@@ -141,6 +146,12 @@ int wmain(int argc, wchar_t** argv) {
         desc.SampleDesc.Count = 1; desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
         ComPtr<ID3D11Texture2D> texture; throw_if_failed(device->CreateTexture2D(&desc, nullptr, &texture), "Input texture");
         Runtime runtime;
+        if (args.count(L"--test-flow-failure")) {
+            const auto bridge=adapter_path.parent_path()/L"nr-runtime"/L"dlss5nr_bridge.dll";
+            runtime.probe_bridge=LoadLibraryExW(bridge.c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_SYSTEM32);
+            auto inject=runtime.probe_bridge?reinterpret_cast<int(__cdecl*)(unsigned)>(GetProcAddress(runtime.probe_bridge,"dlss5nr_test_flow_failure")):nullptr;
+            if (!inject || !inject(flow_failure)) throw std::runtime_error("Flow fault injection unavailable");
+        }
         runtime.module = LoadLibraryExW(adapter_path.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
         if (!runtime.module) throw std::runtime_error("Cannot load adapter DLL");
         auto get = reinterpret_cast<NrAdapterGetApi>(GetProcAddress(runtime.module, "DlssNrAdapterGetApi"));
@@ -149,8 +160,9 @@ int wmain(int argc, wchar_t** argv) {
         if (!runtime.api->initialize(device.Get(), &desc)) { std::wcerr << runtime.api->last_error() << '\n'; return 1; }
         if (!fs::create_directories(output)) throw std::runtime_error("Cannot create output directory");
         std::ofstream csv(output / L"frames.csv"); csv.exceptions(std::ios::badbit | std::ios::failbit);
-        csv << "frame,timestamp_100ns,warmup,success,decode_us,analysis_us,upload_us,process_wall_us,pipeline_us,nr_total_us,input_us,setup_us,flow_us,mv_us,prepare_us,execute_us,bridge_output_us,correction_output_us\n";
+        csv << "frame,timestamp_100ns,warmup,success,decode_us,analysis_us,upload_us,process_wall_us,pipeline_us,nr_total_us,input_us,setup_us,flow_us,mv_us,prepare_us,execute_us,bridge_output_us,correction_output_us,flow_mode,flow_error\n";
         auto analyzer = create_motion_analysis_processor();
+        GpuCaptureConverter capture_converter;
         const bool capture_output = args.count(L"--capture-output") != 0;
         QualityCapture quality;
         std::ofstream inputs, outputs;
@@ -215,14 +227,25 @@ int wmain(int argc, wchar_t** argv) {
                 }
             }
             const auto decode_us = us(start);
+            std::vector<uint8_t> original;
+            uint64_t conversion_us=0;
+            if (gpu_capture) {
+                const auto conversion_start=Clock::now();
+                context->UpdateSubresource(texture.Get(),0,nullptr,frame.bgra.data(),width*4,0);
+                original=std::move(frame.bgra);
+                if (!capture_converter.convert(device.Get(),texture.Get(),0,frame.gpu,frame.bgra,frame.analysis_height))
+                    throw std::runtime_error("GPU capture conversion unavailable (no silent CPU fallback in comparison)");
+                conversion_us=us(conversion_start);
+            }
             const auto analysis_start = Clock::now();
             analyzer->process(frame); auto payload = analyzer->temporal_state();
             payload.nr_style = static_cast<uint16_t>(style); payload.nr_preset = static_cast<uint16_t>(preset);
             payload.nr_intensity_percent = static_cast<uint16_t>(intensity); payload.nr_temporal = static_cast<uint8_t>(temporal);
             const auto analysis_us = us(analysis_start);
             const auto upload_start = Clock::now();
-            context->UpdateSubresource(texture.Get(), 0, nullptr, frame.bgra.data(), width * 4, 0);
-            const auto upload_us = us(upload_start);
+            if (gpu_capture) context->CopyResource(texture.Get(),frame.gpu->texture.Get());
+            else context->UpdateSubresource(texture.Get(), 0, nullptr, frame.bgra.data(), width * 4, 0);
+            const auto upload_us = us(upload_start)+conversion_us;
             const auto process_start = Clock::now();
             const bool ok = runtime.api->process(context.Get(), texture.Get(), &payload);
             const auto process_us = us(process_start), pipeline_us = us(start);
@@ -231,10 +254,10 @@ int wmain(int argc, wchar_t** argv) {
                 << decode_us << ',' << analysis_us << ',' << upload_us << ',' << process_us << ',' << pipeline_us << ','
                 << timing.total_us << ',' << timing.input_us << ',' << timing.setup_us << ',' << timing.optical_flow_us << ','
                 << timing.motion_vector_us << ',' << timing.gpu_prepare_us << ',' << timing.gpu_execute_us << ','
-                << timing.bridge_output_us << ',' << timing.correction_output_us << '\n';
+                << timing.bridge_output_us << ',' << timing.correction_output_us << ',' << timing.flow_mode << ',' << timing.flow_error << '\n';
             if (!ok) { ++failures; error = runtime.api->last_error(); ++decoded; break; }
             if (decoded >= warmup) {
-                if (capture_output) quality.write(context.Get(), texture.Get(), frame.bgra.data(), width, height, inputs, outputs);
+                if (capture_output) quality.write(context.Get(), texture.Get(), gpu_capture?original.data():frame.bgra.data(), width, height, inputs, outputs);
                 process_times.push_back(process_us); pipeline_times.push_back(pipeline_us);
                 if (process_us > budget_us) ++over_budget;
             }
@@ -257,6 +280,8 @@ int wmain(int argc, wchar_t** argv) {
             << ",\n  \"pipeline_capacity_fps\": " << (pipeline.mean > 0 ? 1000000.0 / pipeline.mean : 0)
             << ",\n  \"over_source_frame_budget\": " << over_budget
             << ",\n  \"capture_output\": " << (capture_output ? "true" : "false")
+            << ",\n  \"gpu_capture_replay\": " << (gpu_capture ? "true" : "false")
+            << ",\n  \"flow_failure_injection\": " << flow_failure
             << ", \"performance_comparable\": " << (capture_output ? "false" : "true")
             << ",\n  \"proxy_format\": \"rgb24-nearest-v1\", \"proxy_width\": " << qw << ", \"proxy_height\": " << qh
             << ",\n  \"quality_region_x\": " << qx << ", \"quality_region_y\": " << qy
