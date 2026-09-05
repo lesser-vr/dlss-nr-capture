@@ -36,7 +36,12 @@ implementation. Flow-default decision, nine-suite coverage and limitations:
 - Follow-up priorities 1–5: event-based shared-copy completion, SDR metadata,
   graphics/resume recovery, GPU vertical flip and experimental A/V delay are
   implemented. Bounded live transitions and planar game replay were tested;
-  physical unplug/sleep and measured lip-sync remain acceptance work.
+  physical unplug/sleep remain acceptance work; physical A/V measurement was
+  subsequently skipped at the user's request.
   Small synchronous analysis readback is retained pending evidence that an
   asynchronous path is worth its alignment/latency tradeoff.
   See [results and limitations](capture-stability-sync.md).
+- Latest pushed CI passed. A/V reference generation and software transition
+  tests are ready; physical input/output calibration is excluded at the user's
+  request. GPU-native capture remains opt-in after the default
+  review. See [calibration readiness and default decision](av-calibration-gpu-default.md).

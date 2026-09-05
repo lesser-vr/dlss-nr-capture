@@ -357,6 +357,8 @@ HDR/BT.2020 입력은 지원하지 않으며 SDR 입력으로 바꿔야 합니�
 Audio capture의 Automatic A/V sync (experimental)는 앱 내부 영상 지연 추정에 맞춰
 오디오를 지연합니다(기본 OFF). 카드·스피커 자체 지연 보정은 아니며 수동 지연 옵션을 유지합니다.
 동기화 최적화, 복구, 색 변환과 검증 범위는 [후속 안정성 검증](docs/capture-stability-sync.md)을 참고하세요.
+점멸·클릭 기준 영상 생성과 실측 절차, GPU 캡처 기본 OFF 유지 근거는
+[A/V 보정 준비 및 기본값 판단](docs/av-calibration-gpu-default.md)에 정리했습니다.
 
 워커는 입력·처리·출력 버퍼를 분리하고 픽셀과 분석 정보를 함께 전달합니다.
 화면 표시가 지연되면 결과를 무한히 쌓지 않습니다. 회귀 테스트는 WARP 공유 프레임 검사를
