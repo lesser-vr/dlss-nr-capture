@@ -49,5 +49,7 @@ implementation. Flow-default decision, nine-suite coverage and limitations:
   residual color/highlight protection and held-frame comparison with centered
   zoom. Both GPU-flow builds passed all 10 regression suites, including 15
   numerical composition cases; short hardware NR/UI transitions passed. Subjective
-  quality and sustained performance remain unvalidated. See
+  quality and sustained performance remain unvalidated. A short repeated offline
+  performance and sampled-quality evaluation is now recorded in
+  [creative evaluation](creative-evaluation-20260905.md); defaults remain unchanged. See
   [implementation notes](nr-creative-controls.md) and [test policy](regression-policy.md).

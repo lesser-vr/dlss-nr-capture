@@ -63,6 +63,25 @@ worker-private textures.
 
 ## Compatibility and verification
 
+Measured results and conservative recommendations:
+[2026-09-05 evaluation](creative-evaluation-20260905.md).
+
+`tools/evaluate-creative.ps1 -InputVideo PATH -OutputDir NEW_DIRECTORY` runs five
+conditions (100/75/50% NR, 100% source-color preservation, highlight protection)
+with three rotating timing repeats, then aligned 960x540 quality samples and a
+repeated baseline to measure runtime variability. Tone/Structure stay at 100%.
+Use a video long enough for warmup plus measured frames (defaults: 120+300).
+Raw video artifacts stay local; do not commit the private runtime or generated
+archives. This is not an automated subjective-quality pass.
+
+`tools/benchmark.ps1` also accepts `-NrScale`, `-Tone`, `-Structure`,
+`-ColorPreserve`, and `-HighlightGuard`. It uses the same `NrComposition` helper
+as the worker and initializes NR at the actual reduced dimensions. The
+`process_timing_boundary` field identifies preparation + NR + composition + GPU
+completion wall time. Do not compare these timings with older adapter-only runs.
+Quality capture is a separate, non-performance-comparable run. Decoding and
+analysis are included in pipeline capacity, but live capture/presentation are not.
+
 Worker protocol is 9 and adapter ABI is 6 because the parameter payload changed.
 Deploy app, worker and adapter binaries together. The proprietary NR DLL is not
 modified or redistributed. Public bridge exports remain unchanged.
