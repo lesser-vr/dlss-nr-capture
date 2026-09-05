@@ -33,3 +33,10 @@ implementation. Flow-default decision, nine-suite coverage and limitations:
 - Long-session blackout: not reproduced; added sparse source/output probes and
   presentation-error logging to distinguish candidate causes without hiding frames.
 - Details and measured results: [investigation](shutdown-gpu-blackout.md).
+- Follow-up priorities 1–5: event-based shared-copy completion, SDR metadata,
+  graphics/resume recovery, GPU vertical flip and experimental A/V delay are
+  implemented. Bounded live transitions and planar game replay were tested;
+  physical unplug/sleep and measured lip-sync remain acceptance work.
+  Small synchronous analysis readback is retained pending evidence that an
+  asynchronous path is worth its alignment/latency tradeoff.
+  See [results and limitations](capture-stability-sync.md).

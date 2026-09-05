@@ -50,7 +50,7 @@ low-confidence regions reject temporal history.
 
 ## GPU capture and remaining work
 
-- Opt-in GPU-native capture accepts Media Foundation DXGI samples and converts into three bounded leased BGRA surfaces. A small analysis image is read back; unsupported modes, flip and debug overlay retain CPU conversion. See [current validation](gpu-capture-pipeline.md).
+- Opt-in GPU-native capture accepts Media Foundation DXGI samples and converts into three bounded leased BGRA surfaces. A small analysis image is read back; unsupported modes and debug overlay retain CPU conversion. Supported video processors perform vertical flip on GPU. See [current follow-up validation](capture-stability-sync.md).
 - Complete removal of CPU analysis readback and broad driver/colorimetry coverage remain future work.
 - Forward and backward flow plus global-flow metadata are visualizable.
 - Scene cuts reset all temporal hints.
@@ -66,5 +66,6 @@ and post-window shutdown has a five-second deadline. This is not driver-level
 cancellation or automatic isolation of a faulty kernel driver.
 
 Audio uses a bounded delayed-packet queue and a 200ms waveOut backlog ceiling.
-Selectable positive audio delay is manual synchronization assistance, not
-timestamp-locked A/V playback. See README for settings, local logs and packaging.
+Selectable positive audio delay remains available. Optional automatic delay uses
+arrival-aligned video and WASAPI timestamps; it is not hardware-clock-locked A/V
+playback or fixed card/output-latency calibration. See [follow-up validation](capture-stability-sync.md).
