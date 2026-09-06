@@ -3,7 +3,7 @@
 #include <d3d11.h>
 #include <cstdint>
 
-constexpr uint32_t nr_adapter_abi_version = 6;
+constexpr uint32_t nr_adapter_abi_version = 7;
 
 struct NrTimingSnapshot {
     uint64_t total_us{};

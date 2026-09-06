@@ -25,6 +25,7 @@ constexpr UINT test_capture_failure_message = WM_APP + 42;
 constexpr UINT test_audio_failure_message = WM_APP + 43;
 constexpr UINT test_driver_stall_message = WM_APP + 44;
 constexpr UINT_PTR health_timer_id = 1;
+constexpr UINT_PTR fullscreen_menu_timer_id = 2;
 constexpr UINT device_command_base = 41000;
 constexpr UINT mode_command_base = 42000;
 constexpr UINT mode_combo_id = 43000;
@@ -52,6 +53,7 @@ constexpr UINT comparison_command = 51002;
 constexpr UINT comparison_swap_command = 51003;
 constexpr UINT comparison_hold_command = 51004, comparison_zoom_command = 51005;
 constexpr UINT creative_base=51500, creative_guard=51540, creative_reset=51541;
+constexpr UINT nr_pass_one=51542, nr_pass_two=51543, nr_pass_three=51544;
 constexpr UINT nr_style_base = 51100;
 constexpr UINT nr_preset_base = 51200;
 constexpr UINT nr_intensity_base = 51300;
@@ -190,8 +192,12 @@ int App::run(HINSTANCE instance, int show_command)
            !suspended_ && !graphics_failed_) {
             renderer_.show_notification(L"NR OFF - TURN ON NR WITH F10");
         }
-        if(local && comparison_enabled_ && message.wParam==VK_TAB && (message.message==WM_KEYDOWN || message.message==WM_KEYUP)) {
-            renderer_.set_comparison_peek(message.message==WM_KEYDOWN && plain);
+        if(local && message.wParam==VK_TAB && (message.message==WM_KEYDOWN || message.message==WM_KEYUP)) {
+            renderer_.set_comparison_peek(message.message==WM_KEYDOWN && plain && nr_enabled_ && !suspended_ && !graphics_failed_);
+            if (!plain) {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
             continue;
         }
         // Handle the application shortcut before dispatch so combo-box focus
@@ -268,6 +274,7 @@ void App::load_settings()
     if(read_dword(L"NrTone",value))nr_tone_percent_=std::min(value,100u);
     if(read_dword(L"NrStructure",value))nr_structure_percent_=std::min(value,100u);
     if(read_dword(L"NrScale",value))nr_scale_percent_=(value==50 || value==75)?value:100;
+    if(read_dword(L"NrPasses",value))nr_passes_=value>=1 && value<=3?value:1;
     if(read_dword(L"NrColorPreserve",value))nr_color_preserve_=std::min(value,100u);
     if(read_dword(L"NrHighlightGuard",value))nr_highlight_guard_=value!=0;
     if (read_dword(L"NrWaitMs", value)) nr_wait_ms_ = value == 16 || value == 33 ? value : 2;
@@ -314,6 +321,7 @@ void App::save_settings()
     write_dword(L"NrIntensity", nr_intensity_percent_);
     write_dword(L"NrTone",nr_tone_percent_);write_dword(L"NrStructure",nr_structure_percent_);
     write_dword(L"NrScale",nr_scale_percent_);write_dword(L"NrColorPreserve",nr_color_preserve_);
+    write_dword(L"NrPasses",nr_passes_);
     write_dword(L"NrHighlightGuard",nr_highlight_guard_?1u:0u);
     write_dword(L"NrWaitMs", nr_wait_ms_);
     write_dword(L"AlwaysOnTop", always_on_top_ ? 1u : 0u);
@@ -694,6 +702,32 @@ void App::update_capture_power()
         power_error_logged_ = true;
     } else power_error_logged_ = false;
 }
+void App::update_fullscreen_menu()
+{
+    if (!fullscreen_ || menu_loop_active_) return;
+    POINT cursor{};
+    RECT bounds{};
+    if (!GetCursorPos(&cursor) || !GetWindowRect(window_, &bounds)) return;
+    const UINT dpi = GetDpiForWindow(window_);
+    const int trigger = MulDiv(8, static_cast<int>(dpi), 96);
+    int height = trigger;
+    if (fullscreen_menu_visible_) {
+        MENUBARINFO bar{sizeof(MENUBARINFO)};
+        height = GetMenuBarInfo(window_, OBJID_MENU, 0, &bar)
+            ? bar.rcBar.bottom - bounds.top + trigger
+            : GetSystemMetricsForDpi(SM_CYMENU, dpi) + trigger;
+    }
+    const bool visible = GetForegroundWindow() == window_ &&
+        cursor.x >= bounds.left && cursor.x < bounds.right &&
+        cursor.y >= bounds.top && cursor.y < bounds.top + height;
+    if (visible == fullscreen_menu_visible_) return;
+    fullscreen_menu_visible_ = visible;
+    SetMenu(window_, visible ? menu_bar_ : nullptr);
+    DrawMenuBar(window_);
+    SetWindowPos(window_, nullptr, 0, 0, 0, 0,
+        SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
 void App::toggle_fullscreen()
 {
     const LONG_PTR style = GetWindowLongPtrW(window_, GWL_STYLE);
@@ -711,8 +745,12 @@ void App::toggle_fullscreen()
                      monitor.rcMonitor.bottom - monitor.rcMonitor.top,
                      SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
         fullscreen_ = true;
+        fullscreen_menu_visible_ = false;
+        SetTimer(window_, fullscreen_menu_timer_id, 75, nullptr);
         CheckMenuItem(view_menu_, fullscreen_command, MF_BYCOMMAND | MF_CHECKED);
     } else {
+        KillTimer(window_, fullscreen_menu_timer_id);
+        fullscreen_menu_visible_ = false;
         SetWindowLongPtrW(window_, GWL_STYLE, style | WS_OVERLAPPEDWINDOW);
         SetMenu(window_, menu_bar_);
     renderer_.set_worker_wait_ms(nr_wait_ms_);
@@ -1137,6 +1175,7 @@ void App::publish_creative_settings() {
     InterlockedExchange(&temporal_state_->nr_tone_percent,nr_tone_percent_);
     InterlockedExchange(&temporal_state_->nr_structure_percent,nr_structure_percent_);
     InterlockedExchange(&temporal_state_->nr_scale_percent,nr_scale_percent_);
+    InterlockedExchange(&temporal_state_->nr_passes,nr_passes_);
     InterlockedExchange(&temporal_state_->nr_color_preserve,nr_color_preserve_);
     InterlockedExchange(&temporal_state_->nr_highlight_guard,nr_highlight_guard_?1:0);
 }
@@ -1152,6 +1191,11 @@ void App::rebuild_creative_menu() {
         AppendMenuW(nr_creative_menu_,MF_POPUP,reinterpret_cast<UINT_PTR>(menu),names[group]);
     }
     AppendMenuW(nr_creative_menu_,MF_STRING | (nr_highlight_guard_?MF_CHECKED:0),creative_guard,L"Protect highlights");
+    HMENU passes=CreatePopupMenu();
+    AppendMenuW(passes,MF_STRING | (nr_passes_==1?MF_CHECKED:0),nr_pass_one,L"1 pass (default)");
+    AppendMenuW(passes,MF_STRING | (nr_passes_==2?MF_CHECKED:0),nr_pass_two,L"2 passes (experimental)");
+    AppendMenuW(passes,MF_STRING | (nr_passes_==3?MF_CHECKED:0),nr_pass_three,L"3 passes (experimental)");
+    AppendMenuW(nr_creative_menu_,MF_POPUP,reinterpret_cast<UINT_PTR>(passes),L"NR passes");
     AppendMenuW(nr_creative_menu_,MF_STRING,creative_reset,L"Restore creative defaults");
 }
 void App::apply_nr_settings(bool restart_worker)
@@ -1240,6 +1284,7 @@ void App::update_title()
     const std::string details = processor_->diagnostics();
     if (!details.empty()) title += L" — " + widen(details);
     title += L" — " + nr_worker_status();
+    if(nr_enabled_)title+=L" | NR passes "+std::to_wstring(nr_passes_);
     title += L" | capture GPU/CPU " + std::to_wstring(capture_->gpu_frames()) + L"/" + std::to_wstring(capture_->cpu_frames());
     title += L" | " + std::wstring(capture_->path_status());
     if(graphics_recoveries_) title+=L" | graphics recoveries "+std::to_wstring(graphics_recoveries_);
@@ -1292,6 +1337,17 @@ void App::copy_diagnostics()
     report.add(L"Intensity percent", nr_intensity_percent_);
     report.add(L"Tone percent",nr_tone_percent_);report.add(L"Structure percent",nr_structure_percent_);
     report.add(L"NR scale percent",nr_scale_percent_);report.add(L"Source color preservation",nr_color_preserve_);
+    report.add(L"NR passes",nr_passes_);
+    report.add(L"GPU memory scope", L"DXGI LOCAL worker-process usage/budget; not global GPU usage");
+    if (temporal_state_) {
+        const auto sampled = InterlockedCompareExchange64(&temporal_state_->gpu_memory_sample_ms,0,0);
+        const auto now = GetTickCount64();
+        const bool fresh = sampled > 0 && now >= static_cast<uint64_t>(sampled) && now - sampled <= 3000;
+        report.add(L"GPU memory sample", fresh ? L"fresh (approximately 1 Hz)" : L"unavailable or stale");
+        report.add(L"Worker local memory usage MiB", static_cast<uint64_t>(InterlockedCompareExchange64(&temporal_state_->gpu_memory_usage,0,0)) / (1024*1024));
+        report.add(L"Worker local memory budget MiB", static_cast<uint64_t>(InterlockedCompareExchange64(&temporal_state_->gpu_memory_budget,0,0)) / (1024*1024));
+        report.add(L"Possible VRAM pressure", renderer_.worker_memory_pressure() ? L"yes (at least 90% of worker budget)" : L"not detected; does not exclude global memory contention");
+    }
     report.add(L"Highlight protection",nr_highlight_guard_?L"on":L"off");
     report.add(L"Worker wait ms", nr_wait_ms_);
     report.add(L"Received frames", received_frames_.load());
@@ -1445,6 +1501,14 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         if (message == WM_COMMAND || message == WM_TIMER || message == WM_MOUSEWHEEL || message == frame_ready_message) return 0;
     }
     switch (message) {
+    case WM_ENTERMENULOOP:
+        menu_loop_active_ = true;
+        renderer_.set_comparison_peek(false);
+        break;
+    case WM_EXITMENULOOP:
+        menu_loop_active_ = false;
+        // Defer hiding until Windows has finished dispatching the selected command.
+        break;
     case WM_ACTIVATEAPP:
         if(!wparam){renderer_.set_comparison_peek(false);comparison_dragging_=false;if(GetCapture()==window_)ReleaseCapture();}
         break;
@@ -1458,6 +1522,7 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         }
         break;
     case WM_MOUSEMOVE:
+        update_fullscreen_menu();
         if(comparison_enabled_ && comparison_dragging_) {
             RECT rect{};GetClientRect(window_,&rect);
             if(rect.right>0)renderer_.set_comparison_split(std::clamp(float(GET_X_LPARAM(lparam))/rect.right,0.05f,0.95f));
@@ -1473,6 +1538,11 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         return isolated_test_settings_?static_cast<LRESULT>(renderer_.comparison_diagnostics()):0;
     case WM_APP+47:
         return isolated_test_settings_?static_cast<LRESULT>(renderer_.comparison_split()*1000):0;
+    case WM_APP+48:
+        if (!isolated_test_settings_ || !temporal_state_) return 0;
+        if (wparam == 1) return static_cast<LRESULT>(InterlockedCompareExchange64(&temporal_state_->gpu_memory_usage,0,0)/(1024*1024));
+        if (wparam == 2) return static_cast<LRESULT>(InterlockedCompareExchange64(&temporal_state_->gpu_memory_budget,0,0)/(1024*1024));
+        return renderer_.worker_memory_pressure() ? 1 : 0;
     case WM_APP+45:
         if(isolated_test_settings_) {graphics_failed_=true;last_graphics_retry_=0;}
         return 0;
@@ -1486,6 +1556,10 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
         }
         return TRUE;
     case WM_TIMER:
+        if (wparam == fullscreen_menu_timer_id) {
+            update_fullscreen_menu();
+            return 0;
+        }
         if (wparam == health_timer_id) {
             ensure_graphics_health();
             if(suspended_ || graphics_failed_) return 0;
@@ -1607,9 +1681,14 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
             renderer_.show_notification(renderer_.comparison_held()?L"FRAME HELD - F8 TO RESUME":was?L"LIVE COMPARISON":L"WAIT FOR A MATCHED NR FRAME");return 0;
         }
         if(command==comparison_zoom_command){renderer_.cycle_comparison_zoom();return 0;}
+        if(command==nr_pass_one || command==nr_pass_two || command==nr_pass_three) {
+            nr_passes_=command==nr_pass_three?3:command==nr_pass_two?2:1;
+            rebuild_creative_menu();apply_nr_settings(true);
+            renderer_.show_notification(nr_passes_==3?L"NR 3 PASSES":nr_passes_==2?L"NR 2 PASSES":L"NR 1 PASS");return 0;
+        }
         if(command==creative_guard || command==creative_reset || (command>=creative_base && command<creative_guard)) {
             if(command==creative_guard)nr_highlight_guard_=!nr_highlight_guard_;
-            else if(command==creative_reset){nr_tone_percent_=nr_structure_percent_=nr_scale_percent_=100;nr_color_preserve_=0;nr_highlight_guard_=false;}
+            else if(command==creative_reset){nr_tone_percent_=nr_structure_percent_=nr_scale_percent_=100;nr_color_preserve_=0;nr_highlight_guard_=false;nr_passes_=1;}
             else {const UINT group=(command-creative_base)/10,index=(command-creative_base)%10;
                 if(group>3 || index>4 || (group==2 && index<2))return 0;
                 uint32_t* values[]={&nr_tone_percent_,&nr_structure_percent_,&nr_scale_percent_,&nr_color_preserve_};*values[group]=index*25;}
@@ -1729,7 +1808,7 @@ LRESULT App::handle_message(HWND window, UINT message, WPARAM wparam, LPARAM lpa
     case WM_PAINT: {
         PAINTSTRUCT paint{}; BeginPaint(window, &paint); EndPaint(window, &paint); return 0;
     }
-    case WM_DESTROY: capture_power_.update(false); KillTimer(window, health_timer_id); PostQuitMessage(0); return 0;
+    case WM_DESTROY: capture_power_.update(false); KillTimer(window, health_timer_id); KillTimer(window, fullscreen_menu_timer_id); PostQuitMessage(0); return 0;
     default: break;
     }
     return DefWindowProcW(window, message, wparam, lparam);

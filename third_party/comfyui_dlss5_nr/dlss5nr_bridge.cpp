@@ -134,6 +134,11 @@ static UINT64 g_fence_value = 0;
 
 static NGXParameter* g_params = nullptr;
 static NGXHandle* g_feature = nullptr;
+// Each feature owns a separate temporal history. Source NVOF runs once per frame.
+static NGXHandle* g_extra_features[2] = {};
+static int g_last_pass_count=0;
+static ComPtr<ID3D12Resource> g_second_color, g_second_output;
+static ComPtr<ID3D12DescriptorHeap> g_second_input_descriptors;
 static ComPtr<ID3D12Resource> g_color;
 static ComPtr<ID3D12Resource> g_output;
 static SharedGpuInput g_shared_input;
@@ -522,12 +527,14 @@ static bool EnsureInputPipeline() {
     static constexpr char shader_source[] = R"(
 Texture2D<float4> capture_frame : register(t0);
 RWTexture2D<float4> dlss_color : register(u0);
-cbuffer Dimensions : register(b0) { uint width; uint height; };
+cbuffer Dimensions : register(b0) { uint width; uint height; uint swap_channels; uint clamp_input; };
 [numthreads(8, 8, 1)]
 void main(uint3 id : SV_DispatchThreadID) {
     if (id.x >= width || id.y >= height) return;
     // A BGRA typed SRV returns logical RGBA components.
-    dlss_color[id.xy] = float4(capture_frame.Load(int3(id.xy, 0)).rgb, 1.0);
+    float3 rgb = capture_frame.Load(int3(id.xy, 0)).rgb;
+    if (swap_channels != 0) rgb = rgb.bgr;
+    dlss_color[id.xy] = float4(clamp_input != 0 ? saturate(rgb) : rgb, 1.0);
 })";
     ComPtr<ID3DBlob> shader, errors;
     HRESULT hr = D3DCompile(shader_source, sizeof(shader_source) - 1, nullptr, nullptr, nullptr,
@@ -551,7 +558,7 @@ void main(uint3 id : SV_DispatchThreadID) {
     parameters[1].DescriptorTable.pDescriptorRanges = &ranges[1];
     parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     parameters[2].Constants.ShaderRegister = 0;
-    parameters[2].Constants.Num32BitValues = 2;
+    parameters[2].Constants.Num32BitValues = 4;
     D3D12_ROOT_SIGNATURE_DESC root_desc{};
     root_desc.NumParameters = 3;
     root_desc.pParameters = parameters;
@@ -570,54 +577,59 @@ void main(uint3 id : SV_DispatchThreadID) {
     return true;
 }
 
-static bool CreateInputDescriptors() {
+static bool CreateInputDescriptors(bool second=false) {
     if (!g_shared_input.resource() || !g_color || !EnsureInputPipeline()) return false;
+    auto& descriptors=second?g_second_input_descriptors:g_input_descriptors;
     D3D12_DESCRIPTOR_HEAP_DESC heap{};
     heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     heap.NumDescriptors = 2;
     heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-    if (FAILED(g_device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&g_input_descriptors)))) {
+    if (FAILED(g_device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&descriptors)))) {
         SetError("Input conversion descriptor heap creation failed"); return false;
     }
     const UINT stride = g_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-    D3D12_CPU_DESCRIPTOR_HANDLE handle = g_input_descriptors->GetCPUDescriptorHandleForHeapStart();
+    D3D12_CPU_DESCRIPTOR_HANDLE handle = descriptors->GetCPUDescriptorHandleForHeapStart();
     D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
-    srv.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    srv.Format = second?DXGI_FORMAT_R16G16B16A16_FLOAT:DXGI_FORMAT_B8G8R8A8_UNORM;
     srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
     srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     srv.Texture2D.MipLevels = 1;
-    g_device->CreateShaderResourceView(g_shared_input.resource(), &srv, handle);
+    g_device->CreateShaderResourceView(second?g_output.Get():g_shared_input.resource(), &srv, handle);
     handle.ptr += stride;
     D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
     uav.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-    g_device->CreateUnorderedAccessView(g_color.Get(), nullptr, &uav, handle);
+    g_device->CreateUnorderedAccessView(second?g_second_color.Get():g_color.Get(), nullptr, &uav, handle);
     return true;
 }
 
-static bool RecordInputConversion() {
-    if (!g_input_descriptors) { SetError("Shared GPU input is not configured"); return false; }
-    auto input_read = Barrier(g_shared_input.resource(), D3D12_RESOURCE_STATE_COMMON,
+static bool RecordInputConversion(bool second=false) {
+    auto* descriptors=second?g_second_input_descriptors.Get():g_input_descriptors.Get();
+    auto* source=second?g_output.Get():g_shared_input.resource();
+    auto* target=second?g_second_color.Get():g_color.Get();
+    const auto source_state=second?D3D12_RESOURCE_STATE_UNORDERED_ACCESS:D3D12_RESOURCE_STATE_COMMON;
+    if (!descriptors) { SetError("Shared GPU input is not configured"); return false; }
+    auto input_read = Barrier(source, source_state,
                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     g_cmd->ResourceBarrier(1, &input_read);
-    auto to_write = Barrier(g_color.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+    auto to_write = Barrier(target, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     g_cmd->ResourceBarrier(1, &to_write);
-    ID3D12DescriptorHeap* heaps[] = {g_input_descriptors.Get()};
+    ID3D12DescriptorHeap* heaps[] = {descriptors};
     g_cmd->SetDescriptorHeaps(1, heaps);
     g_cmd->SetComputeRootSignature(g_input_root_signature.Get());
     g_cmd->SetPipelineState(g_input_pipeline.Get());
-    D3D12_GPU_DESCRIPTOR_HANDLE gpu = g_input_descriptors->GetGPUDescriptorHandleForHeapStart();
+    D3D12_GPU_DESCRIPTOR_HANDLE gpu = descriptors->GetGPUDescriptorHandleForHeapStart();
     g_cmd->SetComputeRootDescriptorTable(0, gpu);
     gpu.ptr += g_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     g_cmd->SetComputeRootDescriptorTable(1, gpu);
-    const UINT dimensions[] = {g_width, g_height};
-    g_cmd->SetComputeRoot32BitConstants(2, 2, dimensions, 0);
+    const UINT dimensions[] = {g_width, g_height, second && g_swap_output_channels?1u:0u, second?1u:0u};
+    g_cmd->SetComputeRoot32BitConstants(2, 4, dimensions, 0);
     g_cmd->Dispatch((g_width + 7) / 8, (g_height + 7) / 8, 1);
-    auto input_release = Barrier(g_shared_input.resource(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                                 D3D12_RESOURCE_STATE_COMMON);
+    auto input_release = Barrier(source, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                                 source_state);
     g_cmd->ResourceBarrier(1, &input_release);
-    auto restore = Barrier(g_color.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+    auto restore = Barrier(target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     g_cmd->ResourceBarrier(1, &restore);
     return true;
@@ -854,6 +866,13 @@ static bool UploadMotionVectorTexture(const NvofFlowFrame* flow, bool execute_no
 
 static void ReleaseFeatureAndResources() {
     WaitQueueIdle();
+    for (auto& g_second_feature : g_extra_features) if(g_second_feature) {
+        if(g_nr_release && g_shim_release)g_shim_release(reinterpret_cast<void*>(g_nr_release),g_second_feature);
+        else if(g_core_release)g_core_release(g_second_feature);
+        g_second_feature=nullptr;
+    }
+    g_second_input_descriptors.Reset();g_second_color.Reset();g_second_output.Reset();
+    g_last_pass_count=0;
     if (g_feature) {
         if (g_nr_release && g_shim_release) g_shim_release(reinterpret_cast<void*>(g_nr_release), g_feature);
         else if (g_core_release) g_core_release(g_feature);
@@ -1021,6 +1040,31 @@ static bool EnsureFeature(
     g_feature_style = style;
     g_feature_preset = preset;
     g_feature_motion = motion_key;
+    return true;
+}
+
+static bool EnsureSecondFeature(int index) {
+    auto& g_second_feature = g_extra_features[index];
+    if(g_second_feature)return true;
+    if (!g_second_color) g_second_color=CreateTexture(g_width,g_height,DXGI_FORMAT_R16G16B16A16_FLOAT,
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    if (!g_second_output) g_second_output=CreateTexture(g_width,g_height,DXGI_FORMAT_R16G16B16A16_FLOAT,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+    if(!g_second_color || !g_second_output || (!g_second_input_descriptors && !CreateInputDescriptors(true))) {
+        SetError("Cannot allocate second NR pass resources");return false;
+    }
+    g_params->Set("DLSSNR.Color",g_second_color.Get());
+    g_params->Set("DLSSNR.Output",g_second_output.Get());
+    g_params->Set("DLSSNR.Backbuffer",g_second_output.Get());
+    const NGXResult result=g_shim_create(reinterpret_cast<void*>(g_nr_create),g_cmd.Get(),NR_FEATURE_ID,g_params,&g_second_feature);
+    bool aliased=g_second_feature && (g_second_feature==g_feature || g_second_feature->Id==g_feature->Id);
+    for (int previous=0; previous<index; ++previous)
+        aliased = aliased || (g_second_feature && g_extra_features[previous] &&
+            (g_second_feature==g_extra_features[previous] || g_second_feature->Id==g_extra_features[previous]->Id));
+    if(result!=NGX_SUCCESS || !g_second_feature || aliased) {
+        if(aliased)g_second_feature=nullptr;
+        SetError("Independent second NR feature creation failed: 0x%08X",static_cast<unsigned>(result));return false;
+    }
     return true;
 }
 
@@ -1250,11 +1294,11 @@ __declspec(dllexport) int __cdecl dlss5nr_create_correction_target(
     return 1;
 }
 
-__declspec(dllexport) int __cdecl dlss5nr_process(
+__declspec(dllexport) int __cdecl dlss5nr_process_v2(
     ID3D11Device* input_device, ID3D11DeviceContext* input_context,
     ID3D11Texture2D* input_texture, const uint8_t* bgra_in, int width, int height,
     int style, int preset, float intensity, float tone, float structure, float skin,
-    int automask, int reset, int temporal,
+    int automask, int reset, int temporal, int passes,
     const uint8_t* rejection_mask, int mask_columns, int mask_rows,
     char* err, int err_cap) {
 
@@ -1263,6 +1307,7 @@ __declspec(dllexport) int __cdecl dlss5nr_process(
     g_timings = {};
     g_last_error.clear();
     if (!g_initialized) { SetError("DLSS5 NR bridge is not initialized"); CopyError(err, err_cap); return 0; }
+    if(passes<1 || passes>3){SetError("NR passes must be 1, 2 or 3");CopyError(err,err_cap);return 0;}
     if (!input_device || !input_context || !input_texture || (!g_channel_order_known && !bgra_in) ||
         !g_correction_target || width <= 0 || height <= 0) {
         SetError("Invalid D3D11 input, image buffer, dimensions, or correction target");
@@ -1285,6 +1330,12 @@ __declspec(dllexport) int __cdecl dlss5nr_process(
     if (!EnsureFeature(static_cast<UINT>(width), static_cast<UINT>(height), style, preset, intensity, tone, structure, skin, automask, use_motion_vectors)) {
         CopyError(err, err_cap); return 0;
     }
+    for (int index=0; index<passes-1; ++index) if(!g_extra_features[index]) {
+        if(!EnsureSecondFeature(index)){CopyError(err,err_cap);return 0;}
+        reset=1;
+    }
+    if(g_last_pass_count!=passes)reset=1;
+    g_last_pass_count=passes;
     const auto setup_end = TimingClock::now();
     g_timings.setup_us = ElapsedUs(setup_start, setup_end);
 
@@ -1388,6 +1439,29 @@ __declspec(dllexport) int __cdecl dlss5nr_process(
         g_channel_order_known = true;
         g_timings.bridge_output_us = ElapsedUs(detect_start, TimingClock::now());
     }
+    for (int index=0; index<passes-1; ++index) {
+        // Finish pass 1 before reusing its parameters/command allocator. The
+        // original color stays intact for final rejection/residual composition.
+        if(!ExecuteAndWait() || !RecordInputConversion(true)){CopyError(err,err_cap);return 0;}
+        SetCommonParams(style,preset,intensity,tone,structure,skin,automask,reset?1:0,use_motion_vectors);
+        g_params->Set("DLSSNR.Color",g_second_color.Get());
+        g_params->Set("DLSSNR.Output",g_second_output.Get());
+        g_params->Set("DLSSNR.Backbuffer",g_second_output.Get());
+        er=g_shim_eval(reinterpret_cast<void*>(g_nr_eval),g_cmd.Get(),g_extra_features[index],g_params,nullptr);
+        if(er!=NGX_SUCCESS) {
+            SetError("NR pass %d evaluation failed: 0x%08X",index+2,static_cast<unsigned>(er));
+            ExecuteAndWait();CopyError(err,err_cap);return 0;
+        }
+        D3D12_RESOURCE_BARRIER copy[]={
+            Barrier(g_second_output.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_SOURCE),
+            Barrier(g_output.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_DEST)};
+        g_cmd->ResourceBarrier(2,copy);
+        g_cmd->CopyResource(g_output.Get(),g_second_output.Get());
+        D3D12_RESOURCE_BARRIER restore[]={
+            Barrier(g_second_output.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+            Barrier(g_output.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_UNORDERED_ACCESS)};
+        g_cmd->ResourceBarrier(2,restore);
+    }
     if (!RecordCorrectionOutput(rejection_mask, mask_columns, mask_rows) ||
         !ExecuteAndWait()) { CopyError(err, err_cap); return 0; }
     const auto frame_end = TimingClock::now();
@@ -1395,6 +1469,16 @@ __declspec(dllexport) int __cdecl dlss5nr_process(
     g_timings.total_us = ElapsedUs(frame_start, frame_end);
     CopyError(err, err_cap);
     return 1;
+}
+
+// Preserve the original single-pass export for external callers.
+__declspec(dllexport) int __cdecl dlss5nr_process(
+    ID3D11Device* device,ID3D11DeviceContext* context,ID3D11Texture2D* texture,
+    const uint8_t* bgra,int width,int height,int style,int preset,float intensity,
+    float tone,float structure,float skin,int automask,int reset,int temporal,
+    const uint8_t* mask,int columns,int rows,char* err,int cap) {
+    return dlss5nr_process_v2(device,context,texture,bgra,width,height,style,preset,
+        intensity,tone,structure,skin,automask,reset,temporal,1,mask,columns,rows,err,cap);
 }
 
 __declspec(dllexport) void __cdecl dlss5nr_get_timings_v2(NrTimingSnapshot* result) {

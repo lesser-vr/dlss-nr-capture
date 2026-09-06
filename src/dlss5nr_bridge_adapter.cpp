@@ -15,7 +15,7 @@ using BridgeInit = int (__cdecl*)(int, const wchar_t*, char*, int);
 using BridgeCreateCorrectionTarget = int (__cdecl*)(int, int, HANDLE*, char*, int);
 using BridgeProcess = int (__cdecl*)(ID3D11Device*, ID3D11DeviceContext*, ID3D11Texture2D*,
                                      const uint8_t*, int, int, int, int,
-                                     float, float, float, float, int, int, int,
+                                     float, float, float, float, int, int, int, int,
                                      const uint8_t*, int, int, char*, int);
 using BridgeShutdown = void (__cdecl*)();
 using BridgeGetTimings = void (__cdecl*)(NrTimingSnapshot*);
@@ -86,7 +86,7 @@ bool __stdcall initialize(ID3D11Device* supplied_device, const D3D11_TEXTURE2D_D
         LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!bridge_module) { last_error_message = L"Cannot load nr-runtime\\dlss5nr_bridge.dll"; return false; }
     bridge_init = reinterpret_cast<BridgeInit>(GetProcAddress(bridge_module, "dlss5nr_init"));
-    bridge_process = reinterpret_cast<BridgeProcess>(GetProcAddress(bridge_module, "dlss5nr_process"));
+    bridge_process = reinterpret_cast<BridgeProcess>(GetProcAddress(bridge_module, "dlss5nr_process_v2"));
     bridge_create_correction_target = reinterpret_cast<BridgeCreateCorrectionTarget>(
         GetProcAddress(bridge_module, "dlss5nr_create_correction_target"));
     bridge_shutdown = reinterpret_cast<BridgeShutdown>(GetProcAddress(bridge_module, "dlss5nr_shutdown"));
@@ -173,6 +173,7 @@ bool __stdcall process(ID3D11DeviceContext* context, ID3D11Texture2D* texture,
             temporal->nr_structure_percent / 100.0f, -1.0f,
             temporal->nr_automask ? 1 : 0, policy.reset_history ? 1 : 0,
             policy.use_motion_vectors ? 1 : 0,
+            temporal->nr_passes,
             nullptr, 0, 0,
             error, static_cast<int>(sizeof(error)))) {
         set_last_error(error);

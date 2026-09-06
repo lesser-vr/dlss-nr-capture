@@ -6,7 +6,7 @@
 #include <chrono>
 #include <windows.h>
 #include <d3d11_1.h>
-#include <dxgi1_2.h>
+#include <dxgi1_4.h>
 #include <wrl/client.h>
 #include <cstring>
 #include <cwchar>
@@ -107,7 +107,7 @@ std::wstring adapter_path(bool nr_enabled)
 
 int run_worker(int argc, wchar_t** argv)
 {
-    const bool warp_test = argc == 7 && wcscmp(argv[6], L"--warp-test") == 0;
+    const bool warp_test = (argc == 7 || argc == 8) && wcscmp(argv[6], L"--warp-test") == 0;
     if (argc != 6 && !warp_test) return 2;
     const DWORD parent_id = static_cast<DWORD>(_wtoi(argv[1]));
     const HANDLE shared_input = reinterpret_cast<HANDLE>(_wcstoui64(argv[2], nullptr, 10));
@@ -163,7 +163,7 @@ int run_worker(int argc, wchar_t** argv)
         nr_enabled && InterlockedCompareExchange(&temporal->nr_highlight_guard,0,0)!=0);
     std::unique_ptr<INrAdapter> adapter;
     if (nr_enabled)
-        adapter = std::make_unique<ExternalNrAdapter>(adapter_path(true), adapter_error);
+        adapter = std::make_unique<ExternalNrAdapter>(warp_test && argc == 8 ? argv[7] : adapter_path(true), adapter_error);
     else
         adapter = std::make_unique<PassthroughNrAdapter>();
     std::wstring adapter_error_message;
@@ -184,7 +184,25 @@ int run_worker(int argc, wchar_t** argv)
     uint64_t last_sequence = 0;
     int consecutive_failures = 0;
     SharedCopyCompletion copy_completion;
+    ComPtr<IDXGIDevice> memory_device;
+    ComPtr<IDXGIAdapter> memory_base;
+    ComPtr<IDXGIAdapter3> memory_adapter;
+    if (SUCCEEDED(device.As(&memory_device)) &&
+        SUCCEEDED(memory_device->GetAdapter(&memory_base))) memory_base.As(&memory_adapter);
+    uint64_t last_memory_sample = 0;
     while (WaitForSingleObject(parent, 0) == WAIT_TIMEOUT) {
+        const auto memory_now = GetTickCount64();
+        if (memory_now - last_memory_sample >= 1000) {
+            last_memory_sample = memory_now;
+            DXGI_QUERY_VIDEO_MEMORY_INFO info{};
+            if (memory_adapter && SUCCEEDED(memory_adapter->QueryVideoMemoryInfo(
+                0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info))) {
+                InterlockedExchange64(&temporal->gpu_memory_sample_ms, 0);
+                InterlockedExchange64(&temporal->gpu_memory_usage, static_cast<LONG64>(info.CurrentUsage));
+                InterlockedExchange64(&temporal->gpu_memory_budget, static_cast<LONG64>(info.Budget));
+                InterlockedExchange64(&temporal->gpu_memory_sample_ms, static_cast<LONG64>(memory_now));
+            } else InterlockedExchange64(&temporal->gpu_memory_sample_ms, 0);
+        }
         InterlockedExchange64(&temporal->worker_heartbeat_ms, static_cast<LONG64>(GetTickCount64()));
         const HRESULT acquired = input_mutex->AcquireSync(1, 100);
         if (acquired == S_OK) {
@@ -201,6 +219,8 @@ int run_worker(int argc, wchar_t** argv)
             payload.nr_tone_percent=static_cast<uint16_t>(std::clamp<LONG>(InterlockedCompareExchange(&temporal->nr_tone_percent,0,0),0,100));
             payload.nr_structure_percent=static_cast<uint16_t>(std::clamp<LONG>(InterlockedCompareExchange(&temporal->nr_structure_percent,0,0),0,100));
             payload.nr_automask = 1;
+            const LONG requested_passes=InterlockedCompareExchange(&temporal->nr_passes,0,0);
+            payload.nr_passes=requested_passes>=1 && requested_passes<=3?requested_passes:1;
             if (worker_frame_eligible(payload, last_sequence)) {
                 const auto processing_start=std::chrono::steady_clock::now();
                 auto* model_input=adapter->state_code()==2?composition.prepare(context.Get(),processing_texture.Get()):processing_texture.Get();

@@ -61,7 +61,7 @@ int wmain(int argc, wchar_t** argv) {
                 std::cout << "--input VIDEO (or --synthetic) --output NEW_DIRECTORY [--adapter DLL]\n"
                     "[--frames 300] [--warmup 120] [--style 1] [--preset 3] [--intensity 100] [--temporal 1] [--warp] [--capture-output]\n"
                     "[--capture-format BGRA|NV12|P010] [--gpu-capture]\n"
-                    "[--nr-scale 50|75|100] [--tone 0..100] [--structure 0..100] [--color-preserve 0..100] [--highlight-guard 0|1]\n"
+                    "[--nr-scale 50|75|100] [--nr-passes 1|2|3] [--tone 0..100] [--structure 0..100] [--color-preserve 0..100] [--highlight-guard 0|1]\n"
                     "Offline sequential benchmark; no capture/presentation, no real-time drop or fallback measurement.\n";
                 std::cout << "--full-resolution or --quality-width/--quality-height; optional --quality-x/--quality-y/--quality-region-width/--quality-region-height\n";
                 std::cout << "--gpu-capture replays decoded BGRA through native conversion/analysis (not hardware capture); --test-flow-failure 0..3 is an isolated recovery probe\n";
@@ -72,7 +72,7 @@ int wmain(int argc, wchar_t** argv) {
                      key == L"--warmup" || key == L"--style" || key == L"--preset" || key == L"--intensity" || key == L"--temporal" ||
                      key == L"--quality-width" || key == L"--quality-height" || key == L"--quality-x" || key == L"--quality-y" ||
                      key == L"--quality-region-width" || key == L"--quality-region-height" || key == L"--test-flow-failure" || key==L"--capture-format" ||
-                     key==L"--nr-scale" || key==L"--tone" || key==L"--structure" || key==L"--color-preserve" || key==L"--highlight-guard") {
+                     key==L"--nr-scale" || key==L"--nr-passes" || key==L"--tone" || key==L"--structure" || key==L"--color-preserve" || key==L"--highlight-guard") {
                 if (++i == argc) throw std::runtime_error("Missing option value");
                 args[key] = argv[i];
             } else throw std::runtime_error("Unknown option (see --help)");
@@ -88,6 +88,7 @@ int wmain(int argc, wchar_t** argv) {
         const unsigned intensity = number(L"--intensity", 100, 25, 100), temporal = number(L"--temporal", 1, 0, 1);
         const unsigned flow_failure=number(L"--test-flow-failure",0,0,3);
         const unsigned nr_scale=number(L"--nr-scale",100,50,100);
+        const unsigned nr_passes=number(L"--nr-passes",1,1,3);
         if(nr_scale!=50 && nr_scale!=75 && nr_scale!=100)throw std::runtime_error("NR scale must be 50/75/100");
         const unsigned tone=number(L"--tone",100,0,100), structure=number(L"--structure",100,0,100);
         const unsigned color_preserve=number(L"--color-preserve",0,0,100), highlight_guard=number(L"--highlight-guard",0,0,1);
@@ -262,6 +263,7 @@ int wmain(int argc, wchar_t** argv) {
             payload.nr_style = static_cast<uint16_t>(style); payload.nr_preset = static_cast<uint16_t>(preset);
             payload.nr_intensity_percent = static_cast<uint16_t>(intensity); payload.nr_temporal = static_cast<uint8_t>(temporal);
             payload.nr_tone_percent=static_cast<uint16_t>(tone); payload.nr_structure_percent=static_cast<uint16_t>(structure);
+            payload.nr_passes=static_cast<uint16_t>(nr_passes);
             const auto analysis_us = us(analysis_start);
             const auto upload_start = Clock::now();
             if (gpu_capture) context->CopyResource(texture.Get(),frame.gpu->texture.Get());
@@ -298,6 +300,7 @@ int wmain(int argc, wchar_t** argv) {
             << ",\n  \"fps_numerator\": " << fps_n << ", \"fps_denominator\": " << fps_d
             << ",\n  \"style\": " << style << ", \"preset\": " << preset << ", \"intensity\": " << intensity << ", \"temporal\": " << temporal
             << ",\n  \"nr_scale\": " << nr_scale << ", \"tone\": " << tone << ", \"structure\": " << structure
+            << ", \"nr_passes\": " << nr_passes
             << ", \"color_preserve\": " << color_preserve << ", \"highlight_guard\": " << highlight_guard
             << ", \"model_width\": " << model_desc.Width << ", \"model_height\": " << model_desc.Height
             << ", \"process_timing_boundary\": \"prepare-nr-compose-completion-v1\""

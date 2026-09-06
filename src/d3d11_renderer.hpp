@@ -6,6 +6,7 @@
 #include "nr_speed_policy.hpp"
 #include "overlay_style.hpp"
 #include "blackout_probe.hpp"
+#include "gpu_memory_policy.hpp"
 
 #include <d3d11.h>
 #include <d2d1_1.h>
@@ -64,6 +65,14 @@ public:
     }
     bool worker_correction_too_slow() const noexcept {
         return correction_enabled_ && correction_available_ && speed_monitor_.slow();
+    }
+    bool worker_memory_pressure() const noexcept {
+        if (!temporal_state_) return false;
+        const auto stamp = InterlockedCompareExchange64(&temporal_state_->gpu_memory_sample_ms, 0, 0);
+        const auto usage = InterlockedCompareExchange64(&temporal_state_->gpu_memory_usage, 0, 0);
+        const auto budget = InterlockedCompareExchange64(&temporal_state_->gpu_memory_budget, 0, 0);
+        return stamp == InterlockedCompareExchange64(&temporal_state_->gpu_memory_sample_ms, 0, 0) &&
+            gpu_memory_pressure(usage, budget, stamp, GetTickCount64());
     }
     void set_worker_wait_ms(uint32_t value) noexcept { worker_wait_ms_ = value; }
     void set_worker_correction_enabled(bool value) noexcept { correction_enabled_ = value; }
@@ -129,6 +138,7 @@ private:
     ComPtr<IDWriteFactory> dwrite_factory_;
     ComPtr<IDWriteTextFormat> warning_text_format_;
     ComPtr<IDWriteTextFormat> performance_text_format_;
+    ComPtr<IDWriteTextFormat> comparison_text_format_;
     std::wstring performance_text_;
     std::wstring shared_texture_name_;
     std::wstring worker_event_name_;

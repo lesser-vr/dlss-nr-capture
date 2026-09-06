@@ -25,6 +25,7 @@ private:
     uint32_t nr_tone_percent_{100}, nr_structure_percent_{100}, nr_scale_percent_{100}, nr_color_preserve_{};
     bool nr_highlight_guard_{};
     HMENU nr_creative_menu_{};
+    uint32_t nr_passes_{1};
     void rebuild_creative_menu();
     void publish_creative_settings();
     void toggle_comparison();
@@ -53,6 +54,7 @@ private:
     bool handle_mode_wheel(WPARAM wparam);
     void set_vertical_flip(bool enabled);
     void toggle_fullscreen();
+    void update_fullscreen_menu();
     void set_always_on_top(bool enabled);
     void set_auto_size_to_resolution(bool enabled);
     void resize_window_to_capture(UINT dpi = 0, const POINT* position = nullptr);
@@ -115,6 +117,8 @@ private:
     std::atomic_uint64_t dropped_frames_{};
     uint64_t last_present_latency_ms_{};
     bool fullscreen_{};
+    bool fullscreen_menu_visible_{};
+    bool menu_loop_active_{};
     bool always_on_top_{};
     bool auto_size_to_resolution_{};
     bool performance_overlay_{};

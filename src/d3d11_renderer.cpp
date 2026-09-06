@@ -180,6 +180,11 @@ void D3D11Renderer::initialize_overlay_pipeline()
     throw_if_failed(dwrite_factory_->CreateTextFormat(L"Consolas", nullptr,
         DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
         16.0f, L"en-us", &performance_text_format_), "Create performance text format");
+    throw_if_failed(dwrite_factory_->CreateTextFormat(L"Consolas", nullptr,
+        DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+        18.0f, L"en-us", &comparison_text_format_), "Create comparison text format");
+    comparison_text_format_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+    comparison_text_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     throw_if_failed(d2d_context_->CreateSolidColorBrush(
         D2D1::ColorF(0xA81919, 0.88f), &warning_background_brush_),
                     "Create warning background brush");
@@ -207,7 +212,9 @@ void D3D11Renderer::draw_status_overlay()
     else if (preparing)
         draw_status_banner(L"NR PREPARING", OverlayMessageStyle::information);
     else if (worker_correction_too_slow())
-        draw_status_banner(L"NR TOO SLOW - SHOWING ORIGINAL VIDEO", OverlayMessageStyle::error);
+        draw_status_banner(worker_memory_pressure()
+            ? L"POSSIBLE VRAM PRESSURE\nSHOWING ORIGINAL VIDEO"
+            : L"NR TOO SLOW - SHOWING ORIGINAL VIDEO", OverlayMessageStyle::error);
 }
 
 void D3D11Renderer::draw_status_banner(const std::wstring& message,
@@ -271,7 +278,7 @@ void D3D11Renderer::show_notification(const std::wstring& message)
 
 void D3D11Renderer::render_with_correction()
 {
-    const float constants[]={comparison_split_*frame_width_,comparison_?(comparison_peek_?2.0f:1.0f):0.0f,comparison_swap_?1.0f:0.0f,comparison_zoom_};
+    const float constants[]={comparison_split_*frame_width_,comparison_peek_?2.0f:comparison_?1.0f:0.0f,comparison_swap_?1.0f:0.0f,comparison_zoom_};
     context_->UpdateSubresource(compare_constants_.Get(),0,nullptr,constants,0,0);
     ID3D11Buffer* buffer=compare_constants_.Get(); context_->PSSetConstantBuffers(0,1,&buffer);
     ID3D11RenderTargetView* target = render_target_.Get();
@@ -326,7 +333,7 @@ void D3D11Renderer::match_comparison_frame(uint64_t sequence) {
     }
 }
 void D3D11Renderer::draw_comparison_overlay() {
-    if(!comparison_ || !d2d_context_ || !d2d_target_) return;
+    if((!comparison_ && !comparison_peek_) || !d2d_context_ || !d2d_target_) return;
     const bool ready=correction_active_ && comparison_pair_ && !capture_interrupted_;
     const wchar_t* nr=ready?(comparison_hold_?L"NR HELD (F8 RESUME)":L"NR ACTIVE"):!correction_enabled_?L"NR OFF - ORIGINAL":worker_preparing()?L"PREPARING":L"ORIGINAL FALLBACK";
     const auto size=d2d_context_->GetSize();
@@ -337,14 +344,14 @@ void D3D11Renderer::draw_comparison_overlay() {
     auto label=[&](const wchar_t* text,float left,float right) {
         const auto box=D2D1::RectF(left,96,right,132);
         d2d_context_->FillRectangle(box,warning_background_brush_.Get());
-        d2d_context_->DrawTextW(text,static_cast<UINT32>(wcslen(text)),performance_text_format_.Get(),box,warning_text_brush_.Get(),D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        d2d_context_->DrawTextW(text,static_cast<UINT32>(wcslen(text)),comparison_text_format_.Get(),box,warning_text_brush_.Get(),D2D1_DRAW_TEXT_OPTIONS_CLIP);
     };
     const float width=std::min(240.0f,size.width*0.45f);
     label(comparison_peek_?L"ORIGINAL (TAB)":comparison_swap_?nr:L"ORIGINAL",8,8+width);
     if(!comparison_peek_) {
         label(comparison_swap_?L"ORIGINAL":nr,size.width-width-8,size.width-8);
         const float x=size.width*comparison_split_;
-        d2d_context_->DrawLine(D2D1::Point2F(x,134),D2D1::Point2F(x,size.height),warning_text_brush_.Get(),2);
+        d2d_context_->DrawLine(D2D1::Point2F(x,0),D2D1::Point2F(x,size.height),warning_text_brush_.Get(),2);
     }
     const HRESULT result=d2d_context_->EndDraw();
     if(result==D2DERR_RECREATE_TARGET)d2d_target_.Reset();else throw_if_failed(result,"Draw comparison labels");

@@ -3,7 +3,7 @@
 #include <cstdint>
 
 constexpr uint32_t nr_worker_protocol_magic = 0x4E525743; // NRWC
-constexpr uint32_t nr_worker_protocol_version = 9;
+constexpr uint32_t nr_worker_protocol_version = 11;
 constexpr uint32_t nr_worker_max_mask_tiles = 256;
 
 enum TemporalFlags : uint32_t {
@@ -26,6 +26,7 @@ struct TemporalAnalysisPayload {
     uint16_t nr_preset{3};
     uint16_t nr_intensity_percent{100};
     uint16_t nr_tone_percent{100}, nr_structure_percent{100};
+    uint16_t nr_passes{1};
     uint8_t nr_temporal{1};
     uint8_t nr_automask{1};
     uint8_t rejection_mask[nr_worker_max_mask_tiles]{};
@@ -37,6 +38,8 @@ struct WorkerTemporalState {
     uint32_t byte_size{sizeof(WorkerTemporalState)};
     volatile LONG sequence{};
     volatile LONG64 worker_heartbeat_ms{};
+    // DXGI local-memory accounting for this worker process (not global VRAM).
+    volatile LONG64 gpu_memory_usage{}, gpu_memory_budget{}, gpu_memory_sample_ms{};
     volatile LONG64 worker_processed_frames{};
     volatile LONG flow_mode{};
     volatile LONG flow_error{};
@@ -64,6 +67,7 @@ struct WorkerTemporalState {
     volatile LONG nr_temporal{1};
     volatile LONG nr_tone_percent{100}, nr_structure_percent{100};
     volatile LONG nr_scale_percent{100}, nr_color_preserve{}, nr_highlight_guard{};
+    volatile LONG nr_passes{1};
     wchar_t worker_adapter_name[64]{};
     wchar_t worker_adapter_error_message[256]{};
     TemporalAnalysisPayload payload{};
