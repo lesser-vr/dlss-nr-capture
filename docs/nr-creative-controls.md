@@ -3,7 +3,7 @@
 Implemented after the DLSS 5 upstream review; functional regression now covers
 composition and hardware NR/UI transitions. Subjective quality is not certified. Defaults
 remain Tone 100%, Structure 100%, NR resolution 100%, source-color preservation
-0%, highlight protection OFF. GPU-native capture defaults are unchanged.
+0%, highlight protection OFF, NR passes 1. GPU-native capture defaults are unchanged.
 
 ## Controls
 
@@ -22,7 +22,9 @@ Neural Rendering > Creative controls (experimental):
   pixels, using a smooth transition from maximum RGB 0.75 to 1.0. This preserves
   source highlights rather than reconstructing information already clipped by
   the console/card. It is not HDR tone mapping or the upstream reversible proxy.
-- Restore creative defaults resets only these five controls. They are saved
+- NR passes: 1 (default) or 2 (experimental). The second pass consumes the first
+  result with a separate NR feature/history; see [two-pass notes](nr-two-pass.md).
+- Restore creative defaults resets these creative controls, including passes. They are saved
   with the existing settings. Changing them restarts NR and releases frame hold
   so output from the old configuration cannot be presented as the new one.
 
@@ -82,9 +84,10 @@ completion wall time. Do not compare these timings with older adapter-only runs.
 Quality capture is a separate, non-performance-comparable run. Decoding and
 analysis are included in pipeline capacity, but live capture/presentation are not.
 
-Worker protocol is 9 and adapter ABI is 6 because the parameter payload changed.
+Worker protocol is 11 (worker memory telemetry added) and adapter ABI is 7 (pass-count payload).
 Deploy app, worker and adapter binaries together. The proprietary NR DLL is not
-modified or redistributed. Public bridge exports remain unchanged.
+modified or redistributed. The versioned `dlss5nr_process_v2` adds pass selection;
+the original process export is retained as a one-pass wrapper.
 
 On 2026-09-05 the full suite passed 10/10 in both GPU-flow ON and OFF builds.
 The new WARP composition test passed 15 numerical cases for area downsampling,
