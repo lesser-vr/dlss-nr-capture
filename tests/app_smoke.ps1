@@ -166,7 +166,7 @@ try {
   }
   if ((Get-ItemProperty -LiteralPath $keyPs).AudioDevice -ne '') { throw 'Audio Off was not saved' }
   Write-Host 'audio missing-endpoint wait, selection preservation and Off cancellation passed'
-  foreach ($command in @(49001,49002,49004,51001,51102,51204,51301,51401,48012)) { [void][RegressionUi]::SendMessage([IntPtr]$script:app.MainWindowHandle,0x111,[IntPtr]$command,[IntPtr]::Zero) }
+  foreach ($command in @(49001,49002,49004,51001,51102,51204,51301,51401,48012,51543)) { [void][RegressionUi]::SendMessage([IntPtr]$script:app.MainWindowHandle,0x111,[IntPtr]$command,[IntPtr]::Zero) }
   Start-Sleep -Milliseconds 500
 
   $saved = Get-ItemProperty -LiteralPath $keyPs
@@ -178,8 +178,11 @@ try {
   if ((Get-ItemProperty -LiteralPath $keyPs).GpuNativeCapture -ne 1) { throw 'GPU capture option not saved' }
   if ((Get-ItemProperty -LiteralPath $keyPs).FlipVertical -ne $saved.FlipVertical) { throw 'GPU capture toggle changed vertical flip' }
   if ($saved.PerformanceOverlay -ne 1) { throw 'Performance overlay setting was not persisted' }
+  if ($saved.NrPasses -ne 2) { throw 'Two-pass selection was not persisted' }
   if ($saved.AlwaysOnTop -ne 1 -or $saved.AutoSizeToResolution -ne 1 -or $saved.NrTemporal -ne 0 -or $saved.NrStyle -ne 2 -or $saved.NrPreset -ne 4 -or $saved.NrIntensity -ne 75 -or $saved.NrWaitMs -ne 16) { throw 'Menu settings were not persisted correctly' }
   if (([RegressionUi]::GetWindowLong([IntPtr]$script:app.MainWindowHandle,-20) -band 8) -eq 0) { throw 'Always-on-top style was not applied' }
+  [void][RegressionUi]::SendMessage([IntPtr]$script:app.MainWindowHandle,0x111,[IntPtr]51544,[IntPtr]::Zero)
+  if((Get-ItemProperty -LiteralPath $keyPs).NrPasses -ne 3){throw 'Three-pass selection was not saved'}
   Close-TestApp $script:app; $script:app = Start-TestApp; Start-Sleep -Milliseconds 1500
   $script:app.Refresh()
   if ($script:app.MainWindowTitle -match '(\d+)x(\d+) @') {
@@ -194,6 +197,11 @@ try {
   if (([RegressionUi]::GetWindowLong([IntPtr]$script:app.MainWindowHandle,-20) -band 8) -eq 0) { throw 'Always-on-top setting was not restored' }
   if (-not $script:app.Responding) { throw 'App is not responding after restart' }
   $restoredMenu = [RegressionUi]::GetMenu([IntPtr]$script:app.MainWindowHandle)
+  # An unrelated save must retain the restored pass count, not the default.
+  foreach($command in @(49001,49001)){[void][RegressionUi]::SendMessage([IntPtr]$script:app.MainWindowHandle,0x111,[IntPtr]$command,[IntPtr]::Zero)}
+  if((Get-ItemProperty -LiteralPath $keyPs).NrPasses -ne 3){throw 'Three-pass selection was not restored'}
+  [void][RegressionUi]::SendMessage([IntPtr]$script:app.MainWindowHandle,0x111,[IntPtr]51541,[IntPtr]::Zero)
+  if((Get-ItemProperty -LiteralPath $keyPs).NrPasses -ne 1){throw 'Creative defaults did not reset pass count'}
   Assert-MenuCommand ([RegressionUi]::GetSubMenu($restoredMenu,$labels.IndexOf('Processing'))) 50003 $true
   $restoredView = [RegressionUi]::GetSubMenu($restoredMenu,$labels.IndexOf('View'))
   Assert-MenuCommand $restoredView 49001 $true

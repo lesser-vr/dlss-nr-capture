@@ -3,7 +3,9 @@ param(
   [Parameter(Mandatory=$true)][string]$Candidate,
   [Parameter(Mandatory=$true)][string]$OutputDir,
   [string]$ReleaseDir = "$PSScriptRoot\..\build\Release",
-  [switch]$NoVideo
+  [switch]$NoVideo,
+  [ValidatePattern('^[A-Za-z0-9 ._-]{1,40}$')][string]$BaselineLabel='Baseline',
+  [ValidatePattern('^[A-Za-z0-9 ._-]{1,40}$')][string]$CandidateLabel='Candidate'
 )
 $ErrorActionPreference = 'Stop'
 $Baseline = (Resolve-Path -LiteralPath $Baseline).Path
@@ -64,7 +66,12 @@ if (-not $NoVideo -and $ffmpeg) {
   foreach ($file in @((Join-Path $Baseline 'input.rgb'),(Join-Path $Baseline 'output.rgb'),(Join-Path $Candidate 'output.rgb'))) {
     $videoArgs += @('-f','rawvideo','-pixel_format','rgb24','-video_size',$size,'-framerate',$rate,'-i',$file)
   }
-  $videoArgs += @('-filter_complex','[0:v][1:v][2:v]hstack=inputs=3,pad=ceil(iw/2)*2:ceil(ih/2)*2','-c:v','libx264','-crf','18','-pix_fmt','yuv420p','-movflags','+faststart',(Join-Path $OutputDir 'comparison.mp4'))
+  $labels=@('Source',$BaselineLabel,$CandidateLabel)
+  $fontFile=Join-Path $env:WINDIR 'Fonts/arial.ttf'
+  $fontOption=if(Test-Path -LiteralPath $fontFile){"fontfile='"+$fontFile.Replace('\','/').Replace(':','\:')+"':"}else{''}
+  $filters=for($i=0;$i -lt 3;$i++){"[$($i):v]pad=iw:ih+40:0:40:black,drawtext=$($fontOption)text='$($labels[$i])':fontcolor=white:fontsize=24:x=12:y=8[v$i]"}
+  $filter=($filters -join ';')+';[v0][v1][v2]hstack=inputs=3,pad=ceil(iw/2)*2:ceil(ih/2)*2'
+  $videoArgs += @('-filter_complex',$filter,'-c:v','libx264','-crf','18','-pix_fmt','yuv420p','-movflags','+faststart',(Join-Path $OutputDir 'comparison.mp4'))
   & $ffmpeg.Source @videoArgs
   if ($LASTEXITCODE -ne 0) { throw 'Comparison video encoding failed; numeric report is available' }
   $video = '<video controls width="960" src="comparison.mp4"></video>'
@@ -73,7 +80,7 @@ $html = @"
 <!doctype html><meta charset="utf-8"><title>NR comparison</title>
 <style>body{font:16px system-ui;margin:32px;max-width:1100px}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:8px}video{max-width:100%}</style>
 <h1>NR output comparison</h1>
-<p>Video columns: source / baseline / candidate. Preview starts after warmup; table times refer to the original source.</p>
+<p>Video columns: Source / $BaselineLabel / $CandidateLabel. Preview starts after warmup; table times refer to the original source.</p>
 $video
 <p>$($a.proxy_width)x$($a.proxy_height) RGB samples from source region ($($a.quality_region_x), $($a.quality_region_y), $($a.quality_region_width), $($a.quality_region_height)). Scores use RGB levels 0-255. No motion compensation; flags are review hints, NOT flicker/ghosting verdicts. MP4 is a lossy preview; metrics use raw samples.</p>
 <p>Review rules: frame MAE &gt; 5, temporal residual increase &gt; 3, or nearly static input (change &lt; 1) with candidate residual change &gt; 3. No automatic quality pass/fail.</p>
@@ -81,7 +88,7 @@ $video
 <table><tr><th>Source frame</th><th>Source seconds</th><th>Output MAE</th><th>Residual increase</th><th>Review flag</th></tr>$($table -join "`n")</table>
 "@
 $html | Set-Content -LiteralPath (Join-Path $OutputDir 'report.html') -Encoding UTF8
-[ordered]@{baseline=$Baseline;candidate=$Candidate;baseline_summary=$a;candidate_summary=$b;baseline_manifest=$ma;candidate_manifest=$mb} |
+[ordered]@{baseline=$Baseline;candidate=$Candidate;baseline_label=$BaselineLabel;candidate_label=$CandidateLabel;baseline_summary=$a;candidate_summary=$b;baseline_manifest=$ma;candidate_manifest=$mb} |
   ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $OutputDir 'provenance.json') -Encoding UTF8
 Get-Content -LiteralPath (Join-Path $OutputDir 'comparison.json') -Raw
 Write-Host "Report: $OutputDir\report.html"

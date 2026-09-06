@@ -11,7 +11,8 @@ struct Child {
     ~Child() { if (info.hProcess) { TerminateProcess(info.hProcess,0); WaitForSingleObject(info.hProcess,5000); CloseHandle(info.hProcess); CloseHandle(info.hThread); } }
 };
 int wmain(int argc,wchar_t** argv) {
-    const bool warp=argc==3 && wcscmp(argv[2],L"--warp")==0;
+    const bool failure_test=argc==4 && wcscmp(argv[2],L"--failure")==0;
+    const bool warp=failure_test || (argc==3 && wcscmp(argv[2],L"--warp")==0);
     if (argc!=2 && !warp) return 2;
     try {
         ComPtr<ID3D11Device> device; ComPtr<ID3D11DeviceContext> context;
@@ -46,10 +47,12 @@ int wmain(int argc,wchar_t** argv) {
         auto* state=static_cast<WorkerTemporalState*>(MapViewOfFile(mapping,FILE_MAP_ALL_ACCESS,0,0,sizeof(WorkerTemporalState)));
         if (!state || !ready) throw std::runtime_error("test IPC allocation");
         *state=WorkerTemporalState{}; // NR off: built-in passthrough, no private DLL.
+        if(failure_test){state->nr_enabled=1;state->nr_passes=2;}
         auto number=[](HANDLE h){return std::to_wstring(reinterpret_cast<uintptr_t>(h));};
         std::wstring command=L"\""+std::wstring(argv[1])+L"\" "+std::to_wstring(GetCurrentProcessId())+L" "+
             number(input_handle)+L" "+number(output_handle)+L" "+number(mapping)+L" "+number(ready);
         if(warp) command+=L" --warp-test";
+        if(failure_test) command+=L" \""+std::wstring(argv[3])+L"\"";
         STARTUPINFOW startup{sizeof(startup)}; Child child;
         SharedCopyCompletion completion;
         if (!CreateProcessW(argv[1],command.data(),nullptr,nullptr,TRUE,CREATE_NO_WINDOW,nullptr,nullptr,&startup,&child.info))
@@ -81,6 +84,15 @@ int wmain(int argc,wchar_t** argv) {
             }
             return sequence;
         };
+        if(failure_test) {
+            for(uint64_t sequence=1;sequence<=3;++sequence) submit(sequence);
+            submit(4);
+            if(consume()!=4 || state->worker_adapter_state!=1 || state->worker_adapter_error!=5 ||
+                std::wstring(state->worker_adapter_error_message)!=L"Injected two-pass adapter failure" || state->nr_passes!=2)
+                throw std::runtime_error("Two-pass failure was not reported with original pixel fallback");
+            std::cout<<"Two-pass payload, three failures, explicit error and original pixel fallback passed\n";
+            return 0;
+        }
         submit(1);
         if (WaitForSingleObject(ready,5000)!=WAIT_OBJECT_0) throw std::runtime_error("worker not ready");
         // Do not consume output: worker must continue accepting input and drop bounded results.

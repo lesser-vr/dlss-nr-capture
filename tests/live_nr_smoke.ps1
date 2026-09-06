@@ -4,6 +4,9 @@ param(
  [switch]$ExpectCpu,
  [switch]$Transitions,
  [switch]$CreativeTransitions,
+ [switch]$TwoPassTransitions,
+ [ValidateSet(1,2,3)][int]$NrPasses=1,
+ [ValidateSet(50,75,100)][int]$NrScale=100,
  [string]$DeviceName='',
  [string]$AudioDeviceName='',
  [ValidateSet('NV12','P010','RGB24','RGB32','ARGB32','MJPG','YUY2','UYVY')][string]$Format='NV12',
@@ -32,6 +35,7 @@ public static class LiveNrProbe {
  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h,uint m,IntPtr w,IntPtr l);
  [DllImport("user32.dll")] static extern IntPtr SendMessageTimeout(IntPtr h,uint m,IntPtr w,IntPtr l,uint flags,uint timeout,out UIntPtr result);
  public static long State(IntPtr h){UIntPtr result;if(SendMessageTimeout(h,0x802E,IntPtr.Zero,IntPtr.Zero,2,1000,out result)==IntPtr.Zero)throw new Exception("State query timed out");return (long)result.ToUInt64();}
+ public static long Memory(IntPtr h,int field){UIntPtr result;if(SendMessageTimeout(h,0x8030,(IntPtr)field,IntPtr.Zero,2,1000,out result)==IntPtr.Zero)throw new Exception("Memory query timed out");return (long)result.ToUInt64();}
  [DllImport("user32.dll")] public static extern IntPtr GetMenu(IntPtr h);
  [DllImport("user32.dll")] public static extern IntPtr GetSubMenu(IntPtr h,int p);
  [DllImport("user32.dll")] public static extern int GetMenuItemCount(IntPtr h);
@@ -87,7 +91,7 @@ try {
   New-ItemProperty -LiteralPath $keyPs -Name AudioDevice -Value $AudioDeviceName -PropertyType String | Out-Null
   New-ItemProperty -LiteralPath $keyPs -Name AudioAutoSync -Value 1 -PropertyType DWord | Out-Null
  }
- foreach($item in @{NrEnabled=1;NrTemporal=1;Width=$Width;Height=$Height;FpsNumerator=$Fps;FpsDenominator=1;FlipVertical=0}.GetEnumerator()) {
+ foreach($item in @{NrEnabled=1;NrTemporal=1;NrPasses=$NrPasses;NrScale=$NrScale;Width=$Width;Height=$Height;FpsNumerator=$Fps;FpsDenominator=1;FlipVertical=0}.GetEnumerator()) {
   New-ItemProperty -LiteralPath $keyPs -Name $item.Key -Value $item.Value -PropertyType DWord | Out-Null
  }
  New-ItemProperty -LiteralPath $keyPs -Name VideoFormat -Value $Format -PropertyType String | Out-Null
@@ -144,7 +148,47 @@ try {
   Wait-Path 'application resume' 'graphics recoveries 2' @{VideoFormat='NV12';Width=1920;Height=1080;AudioAutoSync=1}
   $title=Read-Title
  }
+ if($TwoPassTransitions) {
+  Post-Command 51543;Wait-Path 'two-pass start' 'NR passes 2' @{NrPasses=2}
+  foreach($cycle in 1..3) {
+   Post-Command 51542;Wait-Path "one-pass cycle $cycle" 'NR passes 1' @{NrPasses=1}
+   Post-Command 51543;Wait-Path "two-pass cycle $cycle" 'NR passes 2' @{NrPasses=2}
+  }
+  Tap 120;Wait-State 'paired two-pass output' 49 49
+  Tap 119;Wait-State 'hold two-pass pair' 8 8
+  Post-Command 51542;Wait-State 'pass change clears held pair' 8 0
+  Wait-Path 'one-pass pair recovers' 'NR passes 1' @{NrPasses=1}
+  Tap 120;Wait-State 'return to live view' 1 0
+  Tap 121;Wait-State 'NR OFF original fallback' 32 0
+  Post-Command 51543;Start-Sleep -Milliseconds 300
+  if((Get-ItemProperty -LiteralPath $keyPs).NrEnabled -ne 0){throw 'Pass selection enabled NR while OFF'}
+  Wait-State 'OFF pass selection remains original' 32 0
+  Tap 121;Wait-Path 'two-pass ON recovery' 'NR passes 2' @{NrPasses=2;NrEnabled=1}
+  Select-Menu 3 '30.00 fps';Wait-Path 'two-pass 30 fps' 'NR passes 2' @{NrPasses=2;FpsNumerator=30;FpsDenominator=1}
+  Select-Menu 3 '60.00 fps';Wait-Path 'two-pass 60 fps' 'NR passes 2' @{NrPasses=2;FpsNumerator=60;FpsDenominator=1}
+  Select-Menu 2 '2560x1440';Wait-Path 'two-pass 1440p' 'NR passes 2' @{NrPasses=2;Width=2560;Height=1440}
+  Select-Menu 2 '1920x1080';Wait-Path 'two-pass 1080p' 'NR passes 2' @{NrPasses=2;Width=1920;Height=1080}
+  [void][LiveNrProbe]::PostMessage($window,0x10,[IntPtr]::Zero,[IntPtr]::Zero)
+  if(-not $app.WaitForExit(5000) -or $app.ExitCode -ne 0){throw 'Two-pass shutdown failed'}
+  $app=Start-Process -FilePath $AppPath -WorkingDirectory (Split-Path $AppPath) -WindowStyle Hidden -PassThru
+  $restart=[Diagnostics.Stopwatch]::StartNew()
+  do {
+   Start-Sleep -Milliseconds 100;$window=[LiveNrProbe]::CaptureWindow()
+   [uint32]$owner=0
+   if($window -ne [IntPtr]::Zero){[void][LiveNrProbe]::GetWindowThreadProcessId($window,[ref]$owner)}
+  } while($owner -ne $app.Id -and $restart.Elapsed.TotalSeconds -lt 10)
+  if($owner -ne $app.Id){throw 'Restarted test window not found'}
+  Wait-Path 'two-pass restart restores live NR' 'NR passes 2' @{NrPasses=2;NrEnabled=1;Width=1920;Height=1080}
+  $usage=[LiveNrProbe]::Memory($window,1);$budget=[LiveNrProbe]::Memory($window,2)
+  if($usage -le 0 -or $budget -le 0){throw 'Worker DXGI memory telemetry unavailable on required hardware test'}
+  Write-Host "Worker local memory after restart: $usage MiB / $budget MiB budget; possible pressure=$([LiveNrProbe]::Memory($window,0))"
+  $title=Read-Title
+ }
  if($CreativeTransitions) {
+  Post-Command 51543;Wait-Path 'two NR passes' 'NR passes 2' @{NrPasses=2}
+  Post-Command 51523;Wait-Path 'two passes at 75 percent' 'NR passes 2' @{NrPasses=2;NrScale=75}
+  Post-Command 51542;Wait-Path 'return to one pass' 'NR passes 1' @{NrPasses=1}
+  Post-Command 51541;Wait-Path 'pass defaults' 'NR passes 1' @{NrPasses=1;NrScale=100}
   Post-Command 51502;Wait-Path 'Tone 50' 'GPU native' @{NrTone=50}
   Post-Command 51512;Wait-Path 'Structure 50' 'GPU native' @{NrStructure=50}
   Post-Command 51523;Wait-Path 'NR 75 percent' 'GPU native' @{NrScale=75}
@@ -152,6 +196,8 @@ try {
   Post-Command 51534;Wait-Path 'preserve color 100' 'GPU native' @{NrColorPreserve=100}
   Post-Command 51540;Wait-Path 'protect highlights' 'GPU native' @{NrHighlightGuard=1}
   Post-Command 51541;Wait-Path 'creative defaults' 'GPU native' @{NrTone=100;NrStructure=100;NrScale=100;NrColorPreserve=0;NrHighlightGuard=0}
+  Key 9;Wait-State 'normal view Tab original peek without comparison' 3 2
+  Key 9 $false;Wait-State 'normal view Tab release' 3 0
   Tap 120;Wait-State 'F9 paired comparison' 49 49
   Key 9;Wait-State 'Tab original peek' 2 2
   Key 9 $false;Wait-State 'Tab release' 2 0
@@ -167,6 +213,8 @@ try {
   Tap 121;Wait-State 'F10 off clears active NR' 32 0
   Tap 9;Wait-State 'NR OFF Tab guidance' 64 64
   Tap 120;Wait-State 'F9 exits comparison' 1 0
+  Key 9;Wait-State 'normal view NR OFF Tab guidance without peek' 67 64
+  Key 9 $false
   Tap 120;Wait-State 'F9 enables NR and comparison' 49 49
   Tap 119;Wait-State 'hold before settings change' 8 8
   Post-Command 51523;Wait-State 'settings release hold' 8 0
@@ -179,7 +227,7 @@ try {
  if($AudioDeviceName -and ($title -notmatch 'audio packets [1-9][0-9]*' -or $title -match 'Audio reconnect pending')){throw "Audio capture/sync did not remain active: $title"}
  if(-not $app.WaitForExit(5000)){throw 'Normal shutdown exceeded 5 seconds'}
  if($app.ExitCode -ne 0){throw "Shutdown failed: $($app.ExitCode)"}
- [pscustomobject]@{mode='background_hardware_capture';gpu_capture=[bool]$GpuCapture;initial_seconds=$Seconds;elapsed_seconds=[Math]::Round($clock.Elapsed.TotalSeconds,2);transitions=[bool]$Transitions;creative_transitions=[bool]$CreativeTransitions;last_title=$title;exit_code=$app.ExitCode}|ConvertTo-Json
+ [pscustomobject]@{mode='background_hardware_capture';gpu_capture=[bool]$GpuCapture;initial_seconds=$Seconds;elapsed_seconds=[Math]::Round($clock.Elapsed.TotalSeconds,2);transitions=[bool]$Transitions;creative_transitions=[bool]$CreativeTransitions;two_pass_transitions=[bool]$TwoPassTransitions;last_title=$title;exit_code=$app.ExitCode}|ConvertTo-Json
 } finally {
  if($app -and -not $app.HasExited){$app.Kill();[void]$app.WaitForExit(5000)}
  if(Test-Path -LiteralPath $keyPs){Remove-Item -LiteralPath $keyPs -Recurse -Force}

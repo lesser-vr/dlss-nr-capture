@@ -21,6 +21,7 @@
 #include "nr_speed_policy.hpp"
 #include "overlay_style.hpp"
 #include "worker_output_policy.hpp"
+#include "gpu_memory_policy.hpp"
 #include <windows.h>
 #include <iostream>
 #include <string>
@@ -45,6 +46,13 @@ VideoFrame solid(uint32_t width, uint32_t height, uint8_t value, uint64_t sequen
 }
 
 int wmain(int argc, wchar_t** argv) {
+    check(!gpu_memory_pressure(100,0,1000,1000), "unknown budget is not pressure");
+    check(!gpu_memory_pressure(89,100,1000,1000), "below memory threshold");
+    check(gpu_memory_pressure(90,100,1000,1000), "90 percent memory boundary");
+    check(gpu_memory_pressure(110,100,1000,4000), "over budget and last fresh sample");
+    check(!gpu_memory_pressure(110,100,1000,4001), "stale memory cannot trigger warning");
+    check(!gpu_memory_pressure(110,100,0,1000), "failed memory query cannot trigger warning");
+    check(!gpu_memory_pressure(110,100,1000,999), "memory clock reversal guarded");
     {
         auto c=CaptureColor::from(2,1,0,0);check(c.bt601 && c.full && !c.assumed,"601 full metadata");
         check(CaptureColor::from(0,0,0,0).assumed,"missing color metadata explicit default");
@@ -326,7 +334,7 @@ int wmain(int argc, wchar_t** argv) {
     check(nr_notification_opacity(1250) == 0.5f, "NR notification fade midpoint");
     check(nr_notification_opacity(1500) == 0.0f, "NR notification expires after 1.5 seconds");
     check(nr_notification_opacity(5000) == 0.0f, "NR notification stays expired");
-    check(nr_worker_protocol_version == 9, "worker protocol version changed unexpectedly");
+    check(nr_worker_protocol_version == 11, "worker protocol version changed unexpectedly");
     WorkerTemporalState state{};
     check(state.magic == nr_worker_protocol_magic, "protocol magic default");
     check(state.byte_size == sizeof(WorkerTemporalState), "protocol byte size default");
@@ -410,6 +418,9 @@ int wmain(int argc, wchar_t** argv) {
         if (bridge) {
             check(GetProcAddress(bridge, "dlss5nr_init") != nullptr, "bridge init export");
             check(GetProcAddress(bridge, "dlss5nr_process") != nullptr, "bridge process export");
+            check(GetProcAddress(bridge, "dlss5nr_process_v2") != nullptr, "versioned multipass process export");
+            check(TemporalAnalysisPayload{}.nr_passes==1 && WorkerTemporalState{}.nr_passes==1,
+                  "NR defaults to one pass");
             check(GetProcAddress(bridge, "dlss5nr_create_correction_target") != nullptr,
                   "bridge shared correction target export");
             check(GetProcAddress(bridge, "dlss5nr_shutdown") != nullptr, "bridge shutdown export");

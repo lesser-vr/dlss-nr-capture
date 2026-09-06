@@ -129,6 +129,13 @@ if(BUILD_TESTING)
     set_tests_properties(regression.worker-pipeline PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77)
     add_test(NAME regression.worker-pipeline-warp COMMAND dlss-nr-worker-pipeline-test $<TARGET_FILE:dlss-nr-worker> --warp)
     set_tests_properties(regression.worker-pipeline-warp PROPERTIES TIMEOUT 30)
+    add_library(dlss-nr-adapter-failing SHARED tests/failing_adapter.cpp)
+    target_include_directories(dlss-nr-adapter-failing PRIVATE src)
+    target_compile_definitions(dlss-nr-adapter-failing PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_options(dlss-nr-adapter-failing PRIVATE /W4 /permissive- /EHsc /utf-8)
+    add_test(NAME regression.two-pass-fallback COMMAND dlss-nr-worker-pipeline-test
+        $<TARGET_FILE:dlss-nr-worker> --failure $<TARGET_FILE:dlss-nr-adapter-failing>)
+    set_tests_properties(regression.two-pass-fallback PROPERTIES TIMEOUT 30)
     add_executable(dlss-nr-gpu-capture-test tests/gpu_capture.cpp src/frame_processor.cpp)
     target_include_directories(dlss-nr-gpu-capture-test PRIVATE src)
     target_compile_definitions(dlss-nr-gpu-capture-test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
@@ -182,7 +189,7 @@ if(BUILD_TESTING)
 
     add_custom_target(regression
         COMMAND "${CMAKE_CTEST_COMMAND}" -C $<CONFIG> --output-on-failure
-        DEPENDS dlss-nr-capture dlss-nr-worker dlss-nr-adapter-sample
+        DEPENDS dlss-nr-capture dlss-nr-worker dlss-nr-adapter-sample dlss-nr-adapter-failing
                 dlss-nr-composition-test
                 dlss-nr-adapter-bridge dlss5nr-runtime-bridge dlss5nr-caller-shim
                 dlss-nr-regression-core dlss-nr-gpu-input-test dlss-nr-gpu-capture-test dlss-nr-worker-pipeline-test dlss-nr-benchmark dlss-nr-quality-compare
