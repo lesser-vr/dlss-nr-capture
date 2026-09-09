@@ -1,430 +1,184 @@
 # DLSS NR Capture
 
-전체화면: **F11** 또는 View 메뉴. 전체화면에서 마우스를 화면 상단에 가져가면
-메뉴가 나타나고, 상단 메뉴 영역을 벗어나면 숨겨집니다. 펼친 메뉴는 선택하거나
-닫을 때까지 유지됩니다. 상단 감지 영역은 Windows DPI 배율을 반영합니다.
+**English** | [한국어](README.ko.md)
 
-NR 켜기/끄기: **F10** 또는 Neural Rendering 메뉴의 **Toggle DLSS Neural Rendering**. 메뉴 체크 표시로 활성 상태를 확인할 수 있으며 설정은 다음 실행에도 유지됩니다.
+A low-latency Windows capture viewer with experimental Neural Rendering. View
+video and audio from a capture card on your PC, optionally enhancing captured
+frames with a compatible NVIDIA NR runtime supplied separately by the user.
+Processing happens on captured video; the application does not inject a mod
+into the source game.
 
-NR 반복 적용: **Neural Rendering > Creative controls (experimental) > NR passes**에서
-1패스(기본) / 2패스 / 3패스를 선택합니다. 선택은 저장되며 변경 시 NR이 재시작됩니다.
-3패스도 실험 기능입니다. 효과와 아티팩트가 누적될 수 있으며 60FPS를 보장하지 않습니다.
-2패스는 GPU 메모리와 처리 비용을 늘립니다. RTX 5090에서 VRAM 확보 후 1440p·100%
-처리 시간은 약 9.6ms였습니다. 100%도 사용 가능한 후보이며, 메모리 경합이나 처리 여유가
-부족하면 75%를 선택합니다. 60FPS 유지 보장은 아닙니다. [동작과 검증 범위](docs/nr-two-pass.md).
+![DLSS NR Capture displaying gameplay received from a capture card](docs/images/application-screenshot.png)
 
-Windows용 저지연 캡처·Neural Rendering 실험 애플리케이션입니다. 영상·오디오 캡쳐,
-선택적 NR 처리, 장치 복구와 자동 회귀 검사를 포함합니다. 영상은 latest-frame 방식입니다.
+*User-provided application screenshot. The title bar shows a Live Gamer Ultra 2.1
+input at 2560×1440, 60 FPS, MJPG, with a connected NR worker. The 60 FPS value is
+the selected input mode, not a guarantee of NR processing or presentation speed.
+This is an application example, not a before/after comparison or a quality
+benchmark. Game imagery and trademarks belong to their respective owners.*
 
-현재 포함된 기능:
+## Features
 
-- Media Foundation 비디오 캡처 장치 탐색 및 캡처카드 우선 자동 연결
-- 장치별 지원 해상도, 프레임률, 모든 네이티브 포맷 열거 및 RGB24/RGB32/NV12/P010/YUY2/UYVY/MJPG 선택 지원
-- 마우스 휠과 키보드로 이동 가능한 Video mode 드롭다운
-- Video format 및 Resolution 독립 메뉴; 장치가 지원하는 가장 가까운 유효 조합으로 전환
-- `MF_LOW_LATENCY` 비동기 프레임 수신
-- D3D11 flip-model swap chain 출력
-- 처리 지연 시 오래된 프레임을 버리는 latest-frame 큐
-- 교체 가능한 `IFrameProcessor` 경계
-- 외부 또는 유출 NVIDIA 런타임을 저장소에 포함하지 않는 구조
-- `Neural Rendering` 메뉴에서 NR 활성화, 시간축 처리, Style 0-3, Preset 1-4, 강도 및 출력 대기시간 선택
-- NR 옵션을 사용자 설정에 저장하고 다음 실행 시 자동 복원
-- View > Always on top으로 창을 항상 위에 표시하고 선택 상태 자동 복원
-- View > Size window to capture resolution로 캡처 해상도에 맞춘 창 크기 자동 조절 및 상태 복원 (Per-Monitor DPI V2 및 Windows 배율 대응)
-- `nvngx_dlssnr.dll` 누락 시 오류창을 표시하고 패스스루 유지
-- NR 초기화·처리 실패 시 브리지의 상세 오류를 표시하고 안전하게 패스스루로 전환
-- 창 제목에 프레임 도착→표시 지연과 latest-frame 교체 드롭 수 실시간 표시
-- NR 입력·출력 공유 텍스처 분리 및 프레임 정렬: 실시간 NR 완성 프레임을 직접 표시해 최신 원본과 이전 보정값을 섞을 때 생기는 잔상 방지
-- 선택 FPS에 맞춰 NR 속도 판정 자동 조정: 프레임 예산의 90% 이하에서 활성화, 150% 이상에서 저속 판정. 연속 결과 기준도 FPS에 비례하며 60FPS에서는 기존 30회·15ms / 60회·25ms를 유지. 짧은 갱신 공백에는 마지막 NR 프레임을 최대 100ms 유지
-- NR이 너무 느려 원본으로 복귀한 동안에는 창·전체 화면 영상 위에 경고 오버레이 표시
-- NR 프레임의 입력, Optical Flow, GPU 준비·실행, 출력 단계별 시간을 창 제목에 표시
-- NVOF 축소 Flow를 D3D12 compute shader로 전체 해상도 모션 벡터에 확장해 CPU 병목 제거
-- DLSS readback에서 채널 감지, 히스토리 마스크 및 최종 BGRA8 프레임 생성을 한 번에 처리해 중간 float 출력 제거
-- D3D12가 공유 BGRA8 보정 render target을 생성하고 D3D11 worker가 GPU 복사해 정상 프레임의 CPU readback·재업로드 제거
-- BGRA8 입력을 공유 GPU 텍스처로 전달하고 D3D12 compute shader에서 RGBA16F DLSS 입력으로 변환
-- NVOF는 worker의 D3D11 BGRA 텍스처를 GPU에서 직접 복사해 CPU RGB·luma 변환과 재업로드 제거
-- 카메라 회전은 NVOF temporal motion에 맡기고 CPU 평행이동 분석의 reject-all·타일 마스크를 NR에 적용하지 않아 회전 중 history reset 깜빡임 방지
-- 메뉴처럼 카메라 이동 없이 넓은 화면 영역이 바뀌는 전환은 별도로 감지해 NR history를 한 번만 초기화하고 30프레임 쿨다운으로 반복 reset 방지
+- Media Foundation capture-device discovery and device-supported video format,
+  resolution and frame-rate selection. Formats include RGB24/RGB32, NV12, P010,
+  YUY2, UYVY and MJPG, subject to device support.
+- D3D11 flip-model presentation and a bounded latest-frame queue that drops
+  stale frames instead of building an unlimited video backlog.
+- Optional NR worker, shared GPU textures, optical flow, temporal-history
+  handling and passthrough on runtime failure.
+- NR style and intensity, plus experimental tone/structure, source-color
+  preservation, highlight protection, 100/75/50% NR resolution and 1/2/3 passes.
+- Reduced-resolution processing composites the small NR image's changes onto
+  the full-resolution original instead of simply enlarging the processed image.
+- Frame-matched comparison, draggable divider, side swapping, held-frame
+  inspection and centered 1×/2×/4× zoom.
+- Audio capture/playback, manual delay and optional experimental automatic A/V sync.
+- Fullscreen with an auto-hiding top menu, always-on-top, DPI-aware sizing,
+  saved settings, diagnostics and device/worker recovery.
 
-기본 처리 백엔드는 `Passthrough`이며, 사용자가 별도 제공한 호환 런타임이 있을 때만
-선택적으로 DLSS Neural Rendering 브리지를 활성화합니다. GPU 작업 프로세스, 공유 텍스처,
-카메라 모션 분석, 장면 전환 및 히스토리 거부 처리가 구현되어 있습니다.
+Multiple NR passes increase processing and memory costs and can accumulate
+artifacts. No particular appearance, frame rate or end-to-end latency is guaranteed.
+Preset hints being passed to the runtime do not establish a visible effect.
 
-## 빌드
+## Get started
 
-Visual Studio 2026의 C++ Build Tools와 Windows SDK가 필요합니다.
+Download a public package from [Releases](https://github.com/lesser-vr/dlss-nr-capture/releases),
+or build from source below. Keep the app, worker, adapter and bridge from the
+same build together; do not mix binaries from different releases.
+
+1. Connect a Media Foundation-compatible capture device and launch `dlss-nr-capture.exe`.
+2. Choose **Capture device**, **Video format**, **Resolution** and **Frame rate**.
+3. Select an input under **Audio capture** if audio playback is needed.
+4. For NR, place a legally obtained compatible `nvngx_dlssnr.dll` in the app's
+   `nr-runtime/` directory, then press **F10**. A compatible NVIDIA GPU, driver
+   and runtime combination is required; universal RTX-generation support is not established.
+5. Start with one pass and inspect the result. Try a lower NR resolution if
+   processing is too slow, checking moving details as well as still images.
+
+The public package does **not** include NVIDIA's proprietary NR runtime. Missing
+runtime errors identify the expected path; initialization or processing failure
+falls back to original video.
+
+## Controls
+
+| Key or menu | Action |
+| --- | --- |
+| F10 | Toggle NR processing |
+| F11 | Toggle fullscreen; move the pointer to the top edge to reveal the menu |
+| F9 | Toggle original/NR comparison; entering comparison enables NR if needed |
+| Tab (hold) | Temporarily show the original; with NR off, show guidance instead |
+| F8 | Hold/release a completed comparison pair; capture and audio continue |
+| Esc | Exit |
+| Neural Rendering → Creative controls (experimental) | Resolution, color/highlight controls and 1/2/3 passes |
+| View → Performance overlay | Capture/presentation/worker FPS, NR state, timing and drops |
+| View → Refresh devices | Refresh inputs without automatically changing the active source |
+| View → Copy diagnostics to clipboard | Copy settings, counters, timing and recovery information |
+
+Processing-setting changes release a held comparison and restart NR as needed.
+A held image is not reprocessed with new settings. Comparison adds copies and
+memory costs and is not the lowest-latency viewing mode.
+
+## Build
+
+Requires CMake 3.24+, Visual Studio 2026 C++ Build Tools and the Windows SDK.
 
 ```powershell
 cmake -S . -B build -G 'Visual Studio 18 2026' -A x64
 cmake --build build --config Release
 ```
 
-실행 파일은 `build/Release/dlss-nr-capture.exe`에 생성됩니다. 상단의 `Capture device`와
-`Video mode` 메뉴에서 장치 및 `해상도 @ FPS — 픽셀 포맷` 조합을 선택할 수 있습니다.
-`Esc`로 종료합니다.
+Run `build/Release/dlss-nr-capture.exe`. For source builds, place the separately
+supplied runtime at `build/Release/nr-runtime/nvngx_dlssnr.dll`. Public bridge
+and caller modules are built under `build/Release/nr-runtime/`.
 
-## 안전 및 배포 원칙
+GPU flow handoff defaults to ON in new CMake configurations, with CPU-transfer
+fallback. **GPU-native capture is a separate experimental UI option, off by
+default.** Existing CMake caches and user settings may differ. Check diagnostics
+for the actual capture and flow paths.
 
-이 프로젝트는 NVIDIA의 비공개·유출·수정 런타임을 재배포하지 않습니다. 향후 NR
-어댑터는 사용자가 제공한 런타임을 별도 프로세스에서 검증하고 로드합니다.
-런타임이 없거나 초기화에 실패하면 패스스루로 동작합니다.
+## Validation and benchmarks
 
-## 예정된 처리 파이프라인
-
-아래는 장기 방향이며 완성된 GPU-native 캡쳐 파이프라인을 뜻하지 않습니다.
-
-```text
-Capture (D3D11 texture)
-  -> D3D11/D3D12 shared resource
-  -> forward/backward optical flow
-  -> global camera model + residual/confidence
-  -> scene-cut/history control
-  -> optional depth-aware multi-plane correction
-  -> NR runtime adapter
-  -> DirectComposition/swap-chain output
-  -> optional shared-texture OBS output
-```
-
-
-## 선택적 DLSS NR 런타임
-
-빌드하면 공개 MIT 브리지와 호출 보조 모듈이 다음 위치에 생성됩니다.
-
-```text
-build/Release/nr-runtime/dlss5nr_bridge.dll
-build/Release/nr-runtime/caller/nvngx.dll_comfy.dll
-```
-
-실제 Neural Rendering을 사용하려면 사용자가 합법적으로 취득한 호환
-`nvngx_dlssnr.dll`을 `build/Release/nr-runtime/`에 직접 배치해야 합니다. NVIDIA의
-`_nvngx.dll`, `nvngx_dlssnr.dll`, SDK 헤더는 이 저장소와 빌드 결과에 포함되지
-않습니다. 런타임이 없으면 메뉴에서 활성화할 때 설치 위치를 안내하는 오류창이 표시되며,
-초기화 또는 처리에 실패하면 작업 프로세스는 패스스루로 폴백합니다.
-
-공개 브리지의 저작권과 라이선스는 `THIRD_PARTY_NOTICES.md` 및
-`third_party/comfyui_dlss5_nr/LICENSE`를 참조하십시오.
-## 회귀 테스트
-
-변경 위험도별 검증 범위와 작업 단위 생략 원칙은
-[회귀 테스트 정책](docs/regression-policy.md)을 따릅니다.
-
-### 영상 파일 성능 벤치마크
-
-앱/다른 GPU 작업을 종료한 뒤, **프로세스 시간 제한을 제공하는 스크립트**로 실행합니다.
-플레이 중인 콘솔이나 캡쳐카드는 필요하지 않습니다.
+Follow the [regression policy](docs/regression-policy.md). Automated tests do not
+certify subjective image quality, physical A/V latency or every capture driver.
 
 ```powershell
+cmake --build build --config Release --target regression
+# Or test an existing build
+ctest --test-dir build -C Release --output-on-failure
+
+# Run separately from the app and other GPU workloads
 .\tools\benchmark.ps1 -InputVideo 'D:\clips\camera-pan.mp4'
-# 입력 영상 없이 합성 패턴으로 실행
 .\tools\benchmark.ps1 -Synthetic -Warmup 30 -Frames 90
 ```
 
-기본값은 앞 120프레임 워밍업 후 300프레임 측정입니다. 따라서 60FPS 영상은 최소
-7초가 필요합니다. `-Style`, `-Preset`, `-Intensity`, `-Temporal`, `-Warmup`, `-Frames`,
-`-OutputDir`, `-ReleaseDir`, `-TimeoutSeconds`(기본 300초)를 지정할 수 있습니다.
-Media Foundation이 디코딩 가능한 로컬 영상 파일을 지원하며, 중간 해상도 변경은 거부합니다.
-짧은 영상은 자동 반복하지 않고 `incomplete`로 보고합니다. 기존 결과 폴더는 덮어쓰지 않습니다.
+The benchmark defaults to 120 warmup frames and 300 measured frames. It writes
+`frames.csv`, `summary.json` and a hash/settings manifest into a new output
+directory. Compare identical inputs, settings and frame intervals. Offline
+throughput is **not game FPS or live capture latency**. The timeout wrapper
+records incomplete runs and forced cleanup; a timeout is not a successful test.
 
-기본 결과 위치는 `build/Release/benchmark-날짜-고유ID/`입니다.
-
-- `frames.csv`: 프레임 시각, 워밍업 여부, 성공 여부, 디코딩·분석·업로드·NR 단계별 시간(us)
-- `summary.json`: 워밍업 제외 평균/p95/p99/최대 처리시간, 순차 처리량, 원본 FPS 예산 초과 횟수와 설정
-- `manifest.json`: 영상/실행파일/런타임 SHA-256, 실행 시각, 프로세스 종료 및 강제 정리 여부
-
-동일 영상 해시·설정·프레임 구간으로 비교해야 합니다. 처리량은 오프라인 순차 처리의
-최대 처리 용량 추정이며 실제 게임 FPS가 아닙니다. 입력/디스플레이 지연, 실제 드롭률,
-폴백률과 자동 화질 점수는 측정하지 않아 `null`로 표시합니다. 워밍업 프레임은 CSV에 남습니다.
-NR OFF/ON 앱 상태와 무관한 별도 실행이며 앱 사용자 설정을 변경하지 않습니다.
-
-일부 temporal NR 실행은 측정 완료 후 어댑터 정리에서 멈출 수 있습니다. 스크립트는
-유효한 보고서 저장 후 5초 동안 종료되지 않으면 **해당 벤치마크 프로세스만** 종료하며
-`forced_cleanup_after_report`를 기록합니다. 전체 시간 초과는 성공으로 처리하지 않습니다.
-전체 해상도/관심 영역 저장은 아래 옵션으로 지원합니다. 자동 화질 합격/불합격 판정은 하지 않습니다.
-
-### 화질 회귀 검토용 출력 비교
-
-같은 영상으로 기준/후보 출력을 생성한 뒤 비교합니다. 기본값은 **320×180 RGB
-축소 프레임**이며 전체 해상도나 관심 영역도 선택할 수 있습니다. `-CaptureOutput` 사용 시 GPU readback/디스크 출력이
-추가되므로 성능 비교용 실행과 분리해야 합니다(`performance_comparable: false`).
+Use `-CaptureOutput` in a separate visual-review run: readback and file output
+make it unsuitable for performance comparison. `-FullResolution` and region
+options support native-resolution inspection. Quality metrics identify frames
+for review, not an automatic visual-quality pass/fail.
 
 ```powershell
-.\tools\benchmark.ps1 -InputVideo '.\tests\gaming test sample vd.mp4' -CaptureOutput -Warmup 30 -Frames 1204 -OutputDir '.\build\quality-baseline'
-# 변경된 빌드 또는 반복 실행
-.\tools\benchmark.ps1 -InputVideo '.\tests\gaming test sample vd.mp4' -CaptureOutput -Warmup 30 -Frames 1204 -OutputDir '.\build\quality-candidate'
+.\tools\compare-performance.ps1 -Baseline '.\build\baseline' -Candidate '.\build\candidate' -OutputDir '.\build\perf-comparison'
 .\tools\compare-quality.ps1 -Baseline '.\build\quality-baseline' -Candidate '.\build\quality-candidate' -OutputDir '.\build\quality-comparison'
 ```
 
-- 측정 구간의 `input.rgb`/`output.rgb`를 저장합니다. 워밍업은 출력 파일에서 제외되며
-  각 프레임은 `frames.csv`의 원본 시각과 대응합니다. 1204프레임은 실행당 약 397 MiB입니다.
-- 비교 도구는 영상 해시, 설정, GPU, 프레임 수/시각 및 디코딩된 입력 픽셀 일치를 검증합니다.
-- `comparison.csv`는 기준/후보 RGB 평균 절대 차이(MAE), 입력 변화, 시간적 잔차 변화와
-  검토 플래그를 기록합니다. 잔차는 NR 출력에서 입력을 뺀 값이며 **모션 보정은 하지 않습니다**.
-- `report.html`에서 차이가 큰 최대 20프레임의 원본 시각을 확인할 수 있습니다.
-  ffmpeg가 있으면 원본/기준/후보를 나란히 배치한 무음 `comparison.mp4`도 생성합니다.
-  ffmpeg가 없거나 `-NoVideo`를 지정하면 수치/HTML만 생성합니다.
-- MAE > 5, 후보의 시간적 잔차 증가 > 3, 거의 정적인 입력에서 잔차 변화 > 3을
-  검토 대상으로 표시합니다(RGB 0–255 단위의 초기 경험적 기준). **화질 저하 판정이 아닙니다.**
-  카메라/물체 움직임, NR의 의도적 외관 변화, 점 샘플링도 큰 차이를 만들 수 있습니다.
-  작은 잔상·텍스처·HDR 색 정확도는 이 축소 SDR 경로만으로 검증할 수 없습니다.
-- MP4는 검토용 손실 압축 영상이고 지표는 압축 전 RGB 파일로 계산합니다.
-  `quality_pass`는 미판정(null)입니다. 처음에는 같은 빌드 반복 결과로 변동 폭부터 확인하세요.
-
-원본 게임 영상 `tests/gaming test sample vd.mp4`는 Git LFS로 관리합니다.
-
-고해상도/관심 영역 저장 예:
-
-```powershell
-# 전체 영상의 원래 픽셀 크기. 저장량은 프레임 수 × 너비 × 높이 × 6바이트(입력+출력).
-.\tools\benchmark.ps1 -InputVideo '.\tests\gaming test sample vd.mp4' -CaptureOutput -FullResolution -Frames 60
-# (640,360)에서 640×360 영역을 원래 픽셀 크기로 저장
-.\tools\benchmark.ps1 -InputVideo '.\tests\gaming test sample vd.mp4' -CaptureOutput -FullResolution -RegionX 640 -RegionY 360 -RegionWidth 640 -RegionHeight 360 -Frames 60
-# 별도 출력 크기는 -QualityWidth / -QualityHeight로 지정
-```
-
-영역은 원본 SDR 프레임 좌표입니다. 기본 NR 처리는 전체 영상에 적용하고 저장할 때만 잘라냅니다.
-영역/출력 크기가 다른 실행은 비교에서 거부합니다. 공간 여유를 사전 검사하지만 다른 프로그램의
-디스크 사용까지 보장하지는 않습니다. 자동 화질 판정은 없고 기존 검토 지표를 그대로 사용합니다.
-
-성능 비교는 화질 파일을 저장하지 않은 동일 조건 실행끼리 수행합니다.
-
-```powershell
-.\tools\compare-performance.ps1 -Baseline '.\build\baseline' -Candidate '.\build\candidate' -OutputDir '.\build\perf-comparison' -ThresholdPercent 10
-```
-
-평균/p95/p99 NR 처리시간 중 하나라도 기준보다 임계값을 초과해 느려지면 보고서를 남기고 실패합니다.
-보고만 받으려면 `-AllowRegression`을 지정합니다. 기본값 10%는 초기 운영 기준이며 반복 측정으로
-환경 잡음을 확인하세요. 실제 게임 FPS나 화질 판정을 대신하지 않습니다.
-생성 결과와 독점 NR DLL은 Git/LFS에 포함하지 않으며, 게임 영상은 실행 파일 배포 패키지에도 넣지 않습니다.
-
-Git LFS가 설치된 환경에서 저장소를 복제하면 영상 본체도 내려받습니다. 이미 복제했거나
-LFS 다운로드를 생략한 환경에서는 저장소 폴더에서 아래 명령을 실행하세요.
+The reference video uses Git LFS. If only the pointer was checked out, run:
 
 ```powershell
 git lfs install --local
 git lfs pull
-git lfs ls-files
 ```
 
-Git에는 영상의 SHA-256과 크기를 담은 작은 포인터가 저장되고 실제 영상은 LFS에 저장됩니다.
-일반 `git push` 시 설치된 LFS pre-push hook이 영상 본체를 먼저 업로드합니다.
-GitHub Actions는 `lfs: true`로 영상까지 체크아웃합니다. LFS 다운로드에 실패해 포인터만
-남았다면 영상 디코딩 테스트는 실패하므로 `git lfs pull`로 복원해야 합니다.
+Detailed benchmark options and recovery behavior are also preserved in the
+[Korean guide](README.ko.md).
 
-### 자동 회귀 검사
+## Limitations and troubleshooting
 
-GPU fence 입력 전달 실험은 `DLSS_NR_EXPERIMENTAL_GPU_FENCE_INPUT` CMake 옵션으로
-분리했습니다(기본 OFF). 픽셀 일치 테스트는 통과했지만 전체 NR 처리시간 개선은
-확인되지 않아 기본 동기화 경로는 유지합니다. 측정 결과는
-[GPU fence 평가](docs/gpu-fence-evaluation.md), 이후 작업 순서는
-[작업 계획](docs/roadmap.md)을 참조하세요.
+- This is a capture-device viewer, not a desktop/window-capture tool, video
+  player, frame-generation implementation or VR integration.
+- HDR/BT.2020 input is unsupported; use SDR. P010 availability does not imply HDR support.
+- Reduced-resolution NR may cause halos or lose generated fine detail.
+  Color/highlight preservation is an SDR approximation, not HDR reconstruction.
+- Application latency covers capture callback arrival to Present return,
+  excluding console, capture-card and monitor latency.
+- Automatic A/V sync is experimental and off by default. Manual delay delays
+  sound; it cannot advance it or calibrate external hardware.
+- Recovery preserves device identity and exact mode rather than silently
+  selecting another input. Physical reconnection and long-session stability
+  still depend on hardware and drivers.
+- Logs: `%LOCALAPPDATA%\DlssNrCapture\capture.log` and `capture.log.previous`.
+  Captured media is not logged, but errors may include device names or paths.
+  Review diagnostics before sharing them.
 
-NR 워커→D3D12 입력은 공유 GPU 텍스처로 전달하며 정상 처리 중 CPU 픽셀 왕복을 하지 않습니다.
-첫 프레임의 출력 채널 순서 판별에는 CPU 참조 픽셀이 필요합니다. 공유 입력 복사는
-완료 확인 후 사용하고, D3D12 처리 완료 후 재사용하는 직렬 경로입니다.
-캡쳐·분석 단계 전체가 GPU 전용으로 바뀐 것은 아닙니다.
+## Technical documentation
 
-`regression.gpu-input`은 NVIDIA 런타임 없이 WARP로 공유 입력 픽셀 일치, 반복 갱신 및
-크기 변경을 검사합니다. 로컬 NR 런타임이 있을 때는 아래 명령으로 1080p 합성 프레임
-45개와 히스토리 리셋·temporal 모드 전환을 검증할 수 있습니다(화질 평가는 별도).
+Some documents are in Korean and retain historical measurements; those numbers
+do not automatically describe the latest build.
 
-```powershell
-& .\build-vs2026-async\Release\dlss-nr-gpu-input-test.exe "$PWD\build-vs2026-async\Release\dlss-nr-adapter-bridge.dll"
-```
+- [Creative controls and reduced-resolution composition](docs/nr-creative-controls.md)
+- [Multi-pass behavior and validation](docs/nr-two-pass.md)
+- [GPU capture pipeline](docs/gpu-capture-pipeline.md)
+- [Capture stability and A/V sync](docs/capture-stability-sync.md)
+- [A/V calibration and GPU-capture defaults](docs/av-calibration-gpu-default.md)
+- [Shutdown and black-screen diagnostics](docs/shutdown-gpu-blackout.md)
+- [GPU fence evaluation](docs/gpu-fence-evaluation.md)
+- [Long-play validation limits](docs/long-play-validation.md)
+- [Roadmap](docs/roadmap.md)
 
-`View > Performance overlay`는 좌측 하단에 실측 캡쳐/표시/워커 출력 FPS,
-NR 상태와 처리시간 EMA, 앱 내부 지연 및 누적 드롭 수를 표시합니다. 선택은 저장됩니다.
-FPS는 약 1초간의 카운터 변화량이며, 워커 FPS는 NR OFF 시 패스스루도 포함합니다.
-앱 지연은 캡쳐 콜백 도착부터 Present 반환까지로, 콘솔·캡쳐카드·모니터 지연을 포함한
-전체 입력 지연이 아닙니다. 표시는 영상 프레임과 무관하게 타이머에서도 갱신되어 입력이
-멈추면 FPS가 0으로 내려갑니다. 입력 중단 중 지연은 N/A로 표시합니다.
-작은 창(240 DIP 미만)에서는 경고와 겹치지 않도록 숨깁니다.
+## Packaging and third-party components
 
-`View > Refresh devices`는 비디오/오디오 입력 목록을 다시 읽습니다. 앱 실행 후 새 장치를
-연결했거나 USB 포트 변경으로 식별자가 바뀌었을 때 재시작 없이 메뉴에서 선택할 수 있습니다.
-기존 캡쳐·NR 워커·포맷 설정은 재시작하거나 변경하지 않으며 새 장치로 자동 전환하지 않습니다.
-연결이 끊긴 현재 비디오 선택은 복구 대상으로 목록에 유지할 수 있습니다.
-
-문제 발생 시 `View > Copy diagnostics to clipboard`를 선택하면 캡쳐 모드,
-NR 설정과 상태, 프레임 카운터, 처리시간(us), 속도 판정 기준을 복사합니다.
-보고서는 인접 프레임의 값이 섞일 수 있는 실시간 표본이며 영상 자체는 포함하지 않습니다.
-일반 알림은 검정 배경/NVIDIA 그린(#76B900) 글씨를 사용합니다.
-복사 완료 알림은 1초 유지 후 0.5초 동안 사라집니다.
-
-### 실시간 원본 / NR 비교
-
-- `F9` 또는 Neural Rendering > Compare original / NR: 비교 모드 ON/OFF.
-  NR이 꺼져 있으면 켜며, 비교 종료 시 NR 자체는 끄지 않습니다.
-- 왼쪽 원본 / 오른쪽 NR을 같은 크기로 표시합니다. 중앙 경계선 근처를
-  드래그해 비율을 조절하고 Swap comparison sides 메뉴로 좌우를 교환합니다.
-- `Tab`을 누르는 동안 원본을 전체 화면으로 표시하며, 놓으면 이전 표시로 돌아옵니다.
-  일반 모드에서는 현재 캡처 원본, 비교 모드에서는 NR과 짝이 맞는 원본을 표시합니다.
-  누르는 동안 `ORIGINAL (TAB)` 라벨을 표시하며 NR 계산은 계속됩니다.
-- 기존 `F10`은 실제 NR 처리 ON/OFF입니다. 비교 중 끄면 원본을 표시합니다.
-- `F8` 또는 Hold / release comparison frame: 완성된 원본/NR 한 쌍을 정지합니다.
-  Held frame zoom 메뉴는 중앙 기준 1×/2×/4× 확대를 순환합니다.
-  정지 중에는 새로운 NR 입력을 보내지 않지만 캡처와 오디오는 계속됩니다.
-  Tab·경계선·좌우 교환은 정지 상태에서도 동작합니다. 설정을 바꾸거나 입력이
-  끊어지면 정지를 해제합니다. 정지 입력을 새 설정으로 재처리하는 기능은 아닙니다.
-- NR OFF에서 `Tab`을 누르면 F10으로 NR을 켜라는 일반 알림을 표시합니다.
-  NR을 자동으로 켜지 않으며, 길게 눌러도 알림을 반복해서 시작하지 않습니다.
-- 원본과 NR 결과는 프레임 번호가 일치할 때만 비교합니다. 준비 중, 늦은 결과,
-  원본 짝 누락 또는 NR 우회 상태는 PREPARING / ORIGINAL FALLBACK / NR OFF로
-  구분하고 현재 원본으로 돌아갑니다. 실제 NR 결과 없이 NR ACTIVE를 표시하지 않습니다.
-- 원본 보관은 최대 4프레임, 추가 텍스처 합계 128 MiB 이내입니다. 비교 모드는
-  복사·메모리 비용과 표시 지연이 추가될 수 있으며 일반 플레이용 저지연 모드가 아닙니다.
-  비교 모드·좌우 위치는 세션 내 옵션이며 다음 실행에는 비교 OFF로 시작합니다.
-
-Release 빌드와 전체 회귀 테스트를 한 번에 실행합니다.
-
-```powershell
-cmake --build build --config Release --target regression
-```
-
-또는 이미 빌드된 결과에 대해 CTest만 다시 실행할 수 있습니다.
-
-```powershell
-ctest --test-dir build -C Release --output-on-failure
-```
-
-테스트 묶음은 프로토콜·모션 분석·어댑터 ABI, 필수 산출물과 독점 NVIDIA DLL 미포함,
-앱 실행·메뉴·설정 저장 및 재실행 복원을 검사합니다. 앱 테스트는
-`Software\DlssNrCapture\Tests\` 아래의 임시 레지스트리 키를 사용하고 종료 시 제거하므로
-일반 사용자 설정을 변경하지 않습니다.
-정상 종료 시 워커가 남지 않는지, 전체 화면 진입/복귀 시 메뉴와 창 테두리가
-복원되는지, 재실행 후 설정 체크 표시와 진단 메뉴가 유지되는지도 검사합니다.
-진단 메뉴는 존재 여부만 확인하며 테스트에서 사용자 클립보드를 변경하지 않습니다.
-워커는 앱 전용 kill-on-close Job Object에 연결되어 앱 강제 종료 시에도 정리됩니다.
-테스트는 장치 없이도 자식 프로세스 종료 정책을 검증하며, 캡쳐 워커가 실행 가능한
-환경에서는 앱 강제 종료 후 실제 워커가 남지 않는지도 추가 검사합니다.
-워커 상태 검사는 캡쳐 프레임 수와 무관하게 500ms UI 타이머로 실행합니다.
-종료/생성 실패는 최소 5초 간격으로 재시도하며, 최초 heartbeat에는 30초 초기화 유예를 줍니다.
-이후 heartbeat가 2초 넘게 끊기면 재시작합니다(재시작 간격 제한 적용).
-영상 프레임 전달을 막은 상태에서 워커를 종료해도 복구되는지 검사하고, 재시도 횟수와
-마지막 재시작 오류는 진단 복사에 포함합니다.
-
-캡쳐 오류 또는 8초간 프레임이 오지 않는 경우 최소 5초 간격으로 같은 장치를 다시 찾습니다.
-프레임 수신 후 2초간 입력이 멈추거나 오류가 발생하면 기존 오류 스타일로
-`CAPTURE INTERRUPTED - WAITING FOR INPUT`을 표시합니다(최초 입력에는 8초 유예).
-입력 중단 경고는 NR 상태 알림보다 우선하며 새 입력이 오면 해제됩니다.
-대기 화면은 마지막 원본을 다시 그리지만 NR에 재전송하거나 영상 FPS에 합산하지 않습니다.
-장치의 Media Foundation symbolic link와 이전 포맷/해상도/FPS가 일치할 때만 자동 재연결합니다.
-상하 반전 선택은 유지하며, 다른 장치나 낮은 해상도로 자동 전환하지 않습니다.
-장치/모드가 없으면 창 제목에 대기 사유를 표시하고 계속 재시도합니다. 수동 장치 선택은
-이전 복구 대상을 취소합니다. 진단 복사에는 재연결 시도 횟수와 마지막 오류가 포함됩니다.
-무신호 화면도 프레임이 도착하는 한 정상 연결로 취급하며, USB 포트 변경 등으로 식별자가
-달라진 경우 `View > Refresh devices`를 실행한 뒤 장치를 다시 선택할 수 있습니다. 지원 모드만 달라진
-경우 갱신된 모드 메뉴에서 직접 선택할 수 있습니다.
-회귀 테스트는 격리된 테스트 앱에 캡쳐 오류를 주입해 정확한 모드와 반전 설정 복원을
-검사합니다. 실제 USB/HDMI 분리·연결과 드라이버별 복구는 실장치 확인이 필요합니다.
-
-오디오는 캡쳐/출력 오류 시에도 재생 대기 버퍼를 리셋하고 준비 해제한 뒤 출력 장치를
-닫습니다. 캡쳐 패킷도 예외 발생 시 반환합니다. 회귀 테스트는 실제 녹음·재생 없이
-출력 준비/전송/버퍼 회수 실패와 정상 종료의 정리 순서, PCM 복사 및 무음 처리를 검사합니다.
-드라이버가 리셋 후에도 버퍼 반환을 거부하면 잘못된 메모리 접근을 막기 위해 해당 버퍼와
-핸들을 프로세스 종료까지 남깁니다.
-
-선택한 오디오 입력에서 오류가 발생하면 최소 5초 간격으로 자동 재연결합니다.
-Windows endpoint ID를 이름과 함께 저장해 재실행해도 정확히 같은 입력만 선택하며
-이름이 같은 다른 입력으로 임의 전환하지 않습니다. 시작 시 장치가 없어도 선택을 유지하고
-연결을 기다립니다. 비디오 장치가 없는 경우에도 오디오 복원은 수행합니다.
-이전 이름 전용 설정은 같은 이름의 입력이 정확히 하나일 때 ID로 전환하며, 중복되면
-수동 선택을 기다립니다. Off 선택은 저장된 이름과 ID를 모두 지웁니다.
-장치가 없으면 오디오 메뉴를 현재 목록으로 갱신하고 선택 이름을 유지한 채 대기합니다.
-Off 또는 다른 입력을 선택하면 이전 복구 대상은 취소합니다. 진단 복사에는 선택 장치,
-재연결 횟수와 마지막 오류가 포함됩니다. 이 복구는 오류 기반이며 무음 자체는 오류로
-취급하지 않습니다. 출력은 기존과 같이 시스템 기본 출력입니다. 실제 오디오 장치 분리·연결과
-드라이버별 복구는 실장치 확인이 필요합니다.
-자동 테스트는 없는 오디오 endpoint를 지정해 재연결 대기, 선택 보존, Off 취소를 검사하며
-실제 오디오를 녹음하거나 재생하지 않습니다.
-
-## 안정성·오디오·배포
-
-- 비디오도 장치 ID와 정확한 모드를 저장합니다. 시작 시 없으면 선택을 지우거나 다른
-  장치로 바꾸지 않고 기다립니다. 이전 이름 전용 설정은 이름이 유일할 때만 복원합니다.
-- 장치 탐색·시작·종료는 별도 MTA 스레드에서 직렬 실행합니다. 대기 중 창 이동·다시 그리기는
-  처리하지만 설정 명령은 재진입 방지를 위해 무시합니다. 2초가 넘으면 제목에 대기를 표시합니다.
-  대기 중 창을 닫으면 이 앱을 강제 종료하며, 정상 종료 중 드라이버가 5초 이상 멈춰도
-  같은 제한을 적용합니다. 미저장 변경과 마지막 로그는 남지 않을 수 있습니다.
-- 오디오 출력 대기열은 200ms 분량을 넘으면 오래된 소리를 비우고 최신 소리로 복귀합니다.
-  `Audio capture > Audio delay`에서 0/25/50/100/200ms로 소리를 늦출 수 있고 선택은 저장됩니다.
-  지연용 큐도 선택 지연 + 200ms 분량으로 제한됩니다. 이는 자동 A/V 동기화나 소리를
-  앞당기는 보정이 아니며, 큐 초기화 시 짧은 끊김이 생길 수 있습니다.
-- 로컬 오류·복구 로그는 `%LOCALAPPDATA%\DlssNrCapture\capture.log`와 `capture.log.previous`에
-  기록합니다(각 약 1MiB). 영상·오디오 샘플은 기록하지 않지만 오류에 장치 이름/경로가 포함될 수
-  있습니다. 진단 복사에 로그 경로가 포함됩니다. 테스트 앱은 사용자 로그를 쓰지 않습니다.
-
-검증된 빌드로 새 폴더와 ZIP을 생성합니다. 기존 설치/패키지는 덮어쓰지 않습니다.
+Create a new package from a validated build:
 
 ```powershell
 .\tools\package.ps1 -ReleaseDir '.\build\Release' -OutputDir '.\build\public-package'
 ```
 
-공개 실행 파일·브리지·라이선스와 SHA-256 목록만 포함하며 독점 런타임과 게임 영상은
-제외합니다. 원본 파일/런타임 해시가 바뀌지 않았는지도 검사합니다. 새 Windows PC의
-Visual C++ 런타임 설치와 실제 GPU/캡쳐카드 호환성 확인은 별도입니다.
-
-## 종료 검증·암전 진단
-
-View > Prevent display sleep while capturing 옵션은 기본 ON이며 선택값을 저장합니다.
-프레임 수신 중 화면 꺼짐과 자동 절전을 방지하고, 옵션 OFF·캡쳐 중단·앱 종료 시
-해제합니다. 프레임이 2초 이상 끊겨도 해제됩니다. 캡쳐카드가 보내는 무신호 화면은
-정상 프레임으로 취급합니다. Windows 전원 설정은 변경하지 않으며 사용자가 직접
-선택한 절전은 막지 않습니다. 이 옵션은 GPU·케이블 오류에 의한 암전 해결책은 아닙니다.
-구현은 Windows의 [SetThreadExecutionState](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-setthreadexecutionstate)를 사용합니다.
-
-tools/check-nr-shutdown.ps1에 ReleaseDir와 새로운 OutputDir를 지정하면 실제 NR을
-temporal ON/OFF로 반복 실행하고 강제 종료가 필요하면 실패합니다. 호환 GPU와
-사용자 제공 NR DLL이 필요하며 일반 CI에는 포함되지 않습니다.
-
-업데이트된 앱은 capture.log에 실행 경로, 화면 표시 오류, 원본/출력의 어두운
-표본 여부를 기록합니다. 초당 9개 지점만 비차단 방식으로 검사하며 영상은 저장하지
-않습니다. 정상적인 게임 암전도 같은 값이 나올 수 있어 자동 오류 판정은 하지 않습니다.
-재현 시 발생 시각, 소리 지속 여부, 메뉴/오버레이 표시 여부, F10 전환 결과를 함께
-확인하세요. GPU 직접 모션 벡터 전송 실험과 측정 결과는
-[종료·GPU·암전 조사](docs/shutdown-gpu-blackout.md)에 정리했습니다.
-
-## GPU 직접 캡쳐 (실험 옵션)
-
-Processing > GPU-native capture (experimental)에서 켜고 끌 수 있으며 선택을
-저장합니다. 기본 OFF입니다. 지원되는 GPU 표면은 전체 영상을 CPU로 복사하지 않고
-처리하며, 모션 분석용 작은 영상만 읽습니다. 미지원 포맷·history overlay는
-기존 CPU 경로를 사용합니다. 제목의 capture GPU/CPU로 실제 경로를 확인할 수 있습니다.
-지원 장치에서는 상하 반전도 GPU에서 처리합니다. SDR BT.601/709 및 full/limited 범위는
-입력 메타데이터를 반영하며, 메타데이터가 없으면 기본값임을 진단에 표시합니다.
-HDR/BT.2020 입력은 지원하지 않으며 SDR 입력으로 바꿔야 합니다. 변경 시 캡쳐를 다시 연결합니다.
-
-Audio capture의 Automatic A/V sync (experimental)는 앱 내부 영상 지연 추정에 맞춰
-오디오를 지연합니다(기본 OFF). 카드·스피커 자체 지연 보정은 아니며 수동 지연 옵션을 유지합니다.
-동기화 최적화, 복구, 색 변환과 검증 범위는 [후속 안정성 검증](docs/capture-stability-sync.md)을 참고하세요.
-점멸·클릭 기준 영상 생성과 실측 절차, GPU 캡처 기본 OFF 유지 근거는
-[A/V 보정 준비 및 기본값 판단](docs/av-calibration-gpu-default.md)에 정리했습니다.
-
-워커는 입력·처리·출력 버퍼를 분리하고 픽셀과 분석 정보를 함께 전달합니다.
-화면 표시가 지연되면 결과를 무한히 쌓지 않습니다. 회귀 테스트는 WARP 공유 프레임 검사를
-포함해 9개로 확대했습니다. 공유 버퍼를 넘기기 전에 복사 완료를 확인합니다.
-GPU flow 기본 적용 판단, 측정값 및 남은 검증은
-[GPU 캡쳐·버퍼 검증](docs/gpu-capture-pipeline.md)을 참고하세요.
-
-GPU flow는 별도의 무거운 AI 모델을 추가하는 기능이 아니라, 기존 GPU optical flow
-결과를 CPU로 읽었다가 다시 GPU로 올리는 전송을 줄이는 최적화입니다. GPU 내부 복사·
-동기화와 공유 메모리 비용은 남으며, 주된 GPU 부담은 NR 추론입니다. RTX 5090에서는
-평균 NR 처리 시간이 약 6.92ms에서 6.09ms로 줄었습니다. GPU 공유 생성·복사·시간 초과
-실패 시 NR을 유지하는 CPU 벡터 전송 복구를 추가하고, 새 빌드의 GPU flow 기본값을 ON으로
-변경했습니다. 기존 CMake 캐시에서 OFF로 설정했다면 ON으로 다시 설정해야 합니다.
-GPU 자체의 멈춤/제거까지 복구를 보장하지는 않으며 기존 워커 보호가 유지됩니다.
-GPU-native capture 옵션은 별개이며 기본 OFF를 유지합니다.
-
-제목과 View > Copy diagnostics to clipboard에서 실제 캡쳐 경로, CPU 우회 이유,
-flow 전송 경로와 원래 오류 코드를 확인할 수 있습니다. 바이너리는 ABI 6/프로토콜 9로
-함께 갱신해야 하며 이전 버전 DLL을 섞어 사용하지 마세요.
-
-동일 게임 영상 비교는 `tools/benchmark.ps1 -GpuCapture -CaptureOutput`으로 GPU
-BGRA 변환·축소 분석 경로를 재생한 뒤 기존 화질 비교 도구를 사용합니다. 실제 캡쳐카드의
-디코딩이나 HDMI 지연을 측정하는 모드는 아닙니다. 오류 복구 재검증은
-`tests/flow_recovery.ps1 -ReleaseDir <경로> -OutputDir <새 경로>`를 사용하며,
-`-InputVideo`를 생략하면 합성 영상으로 검사합니다. 실제 NVIDIA GPU와 개인 NR DLL이 필요합니다.
-
-GPU 직접 캡쳐는 추가 실장치 검사에서 NV12 1440p60·4K60, P010 1440p60·4K30의
-NR 연동과 정상 종료를 확인했습니다. 각 30초 검사이며 장시간 플레이/주관적 화질을
-보장하지 않습니다. 장시간 검사 자동화의 권장 구성과 현재 도구의 한계는
-[장시간 플레이 자동 검증 검토](docs/long-play-validation.md)에 정리했습니다.
+The package includes public binaries, notices and SHA-256 checksums, excluding
+proprietary NVIDIA runtimes and reference game video. See
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and the
+[bridge license](third_party/comfyui_dlss5_nr/LICENSE).
+This is an independent experimental project, not an official NVIDIA product.
